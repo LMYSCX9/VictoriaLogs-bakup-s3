@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VictoriaLogs 不停机备份/恢复工具 · 产品需求文档</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f7f8f7;
+    --surface-2: #f0f2f0;
+    --text: #17181a;
+    --muted: #5b6167;
+    --border: #e3e6e3;
+    --brand: #0f7a4a;
+    --brand-soft: #eaf6ef;
+    --warn: #8a5a00;
+    --warn-soft: #fdf6e5;
+    --danger: #a12a2a;
+    --danger-soft: #fdeeee;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.75 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 980px; margin: 0 auto; padding: 56px 28px 96px; }
+  header.doc { border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 36px; }
+  .kicker {
+    font: 600 12px/1.4 var(--sans);
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--brand);
+    margin: 0 0 10px;
+  }
+  h1 { font-size: 30px; line-height: 1.35; margin: 0 0 14px; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 20px; max-width: 76ch; }
+  .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 20px; }
+  .meta div { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .meta dt { font-size: 12px; color: var(--muted); margin: 0 0 2px; }
+  .meta dd { margin: 0; font-size: 14px; font-weight: 500; }
+  nav.toc {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; margin: 0 0 40px;
+  }
+  nav.toc p { margin: 0 0 8px; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  nav.toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 32px; font-size: 14px; }
+  nav.toc li { margin: 2px 0; break-inside: avoid; }
+  nav.toc a { color: var(--text); text-decoration: none; border-bottom: 1px solid transparent; }
+  nav.toc a:hover { border-bottom-color: var(--brand); color: var(--brand); }
+  h2 {
+    font-size: 21px; font-weight: 640; margin: 48px 0 14px; padding-top: 10px;
+    border-top: 1px solid var(--border); letter-spacing: -0.005em;
+  }
+  h3 { font-size: 16px; font-weight: 620; margin: 28px 0 8px; }
+  h4 { font-size: 14px; font-weight: 600; margin: 20px 0 6px; color: var(--muted); letter-spacing: .02em; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  code {
+    font-family: var(--mono); font-size: 12.5px; background: var(--surface-2);
+    padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border);
+  }
+  pre {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; margin: 12px 0;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 12px; border: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface); font-weight: 600; font-size: 13px; }
+  tbody tr:nth-child(even) td { background: #fbfcfb; }
+  .tag {
+    display: inline-block; font: 600 11px/1.5 var(--sans); padding: 1px 8px;
+    border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
+    background: var(--surface); white-space: nowrap;
+  }
+  .tag.p0 { color: var(--brand); border-color: #b9e0c9; background: var(--brand-soft); }
+  .tag.p1 { color: var(--warn); border-color: #eadcae; background: var(--warn-soft); }
+  .tag.no { color: var(--danger); border-color: #efc8c8; background: var(--danger-soft); }
+  .note {
+    border-left: 3px solid var(--brand); background: var(--brand-soft);
+    padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; font-size: 14px;
+  }
+  .warn { border-left-color: #d9a520; background: var(--warn-soft); }
+  .tbd { font: 600 11px/1.5 var(--sans); color: var(--warn); border: 1px dashed #d9a520; padding: 0 6px; border-radius: 4px; white-space: nowrap; }
+  .fr { border: 1px solid var(--border); border-radius: 10px; padding: 4px 20px 16px; margin: 18px 0; }
+  .fr > h3 { margin-top: 16px; }
+  .fr dl { display: grid; grid-template-columns: 96px 1fr; gap: 4px 16px; margin: 8px 0 0; font-size: 14px; }
+  .fr dt { color: var(--muted); font-weight: 500; }
+  .fr dd { margin: 0; }
+  footer.doc { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+  @media (max-width: 700px) {
+    nav.toc ol { columns: 1; }
+    .fr dl { grid-template-columns: 1fr; }
+    .fr dt { margin-top: 8px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+<header class="doc">
+  <p class="kicker">PRD · 内部运维工具</p>
+  <h1>VictoriaLogs 不停机备份 / 恢复工具（S3 后端）</h1>
+  <p class="sub">以「天分区」为单位，在 VictoriaLogs 持续写入的前提下把历史日志备份到 S3 兼容对象存储，并支持按指定日期在线回灌到原实例或新实例。交付物为单一 Go 二进制。</p>
+  <dl class="meta">
+    <div><dt>文档版本</dt><dd>v0.1（待评审）</dd></div>
+    <div><dt>目标读者</dt><dd>SRE · 平台研发</dd></div>
+    <div><dt>形态</dt><dd>CLI 二进制 + cron 调度</dd></div>
+    <div><dt>状态</dt><dd>需求补充稿，含待确认项</dd></div>
+  </dl>
+</header>
+
+<nav class="toc">
+  <p>目录</p>
+  <ol>
+    <li><a href="#bg">背景与目标</a></li>
+    <li><a href="#who">角色、场景与判定</a></li>
+    <li><a href="#scope">需求范围</a></li>
+    <li><a href="#model">核心模型与术语</a></li>
+    <li><a href="#fr">功能需求</a></li>
+    <li><a href="#rules">共享规则与异常矩阵</a></li>
+    <li><a href="#constraint">技术约束</a></li>
+    <li><a href="#spec">工程规范</a></li>
+    <li><a href="#qa">待确认问题</a></li>
+  </ol>
+</nav>
+
+<h2 id="bg">1. 背景与目标</h2>
+<p>VictoriaLogs 的数据以 UTC 天为单位落在 <code>&lt;storageDataPath&gt;/partitions/&lt;YYYYMMDD&gt;</code>，每个分区自包含。它是日志的唯一副本：一旦分区目录损坏、被误删，或实例所在磁盘故障，<code>-retentionPeriod</code> 到期前的数据将不可找回；同时，日志常常需要「比保留期更久」地留存以应对审计与故障复盘。</p>
+<p>现有做法有两个明显缺口：一是只能整库停服冷拷贝，与「日志不能断」冲突；二是靠人工 <code>rsync</code> 到远端机器，缺少完整性证据、无法回答「2026-10-27 这份备份能不能用」。</p>
+<p>产品决策与预期可观察结果：</p>
+<ul>
+  <li>备份对象是<b>分区</b>而不是实例：按天可增量、可单独校验、可单天回灌。</li>
+  <li>备份与恢复全程通过 VictoriaLogs 自带的分区管理端点完成，<b>不重启进程</b>，其余日期的写入与查询不受影响。</li>
+  <li>完成判定可观察：运维能列出某天备份、看到文件数与字节数、校验通过，并在恢复后查询到该天数据。</li>
+</ul>
+
+<h2 id="who">2. 角色、场景与判定</h2>
+<table>
+  <thead><tr><th>角色</th><th>职责与权限边界</th></tr></thead>
+  <tbody>
+    <tr><td>SRE / 值班同学</td><td>发起单天备份与恢复；只读查询备份清单；恢复属于高危操作，需显式确认。</td></tr>
+    <tr><td>平台研发</td><td>部署二进制、配置 S3 凭据与定时任务、排查失败作业。</td></tr>
+  </tbody>
+</table>
+
+<h4>核心场景（P0）</h4>
+<ol>
+  <li><b>日常备份</b>：cron 每日凌晨把「昨天」的分区备份到 S3，失败需告警。</li>
+  <li><b>按天恢复</b>：某天数据被误删或损坏，运维指定日期在线回灌，无需停服。</li>
+  <li><b>备份可信</b>：审计前能证明某天备份完整（清单 + 校验）。</li>
+</ol>
+<p><b>触发</b>：定时任务或人工执行一次 CLI 命令。<b>完成条件</b>：备份侧出现带 manifest 的提交记录且校验通过；恢复侧目标日期数据可被查询，且实例未重启、其他日期无影响。</p>
+
+<h2 id="scope">3. 需求范围</h2>
+<table>
+  <thead><tr><th>优先级</th><th>能力</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag p0">P0</span></td><td>单天 / 日期区间备份</td><td>快照 → 上传 → 提交清单 → 清理快照，全程在线。</td></tr>
+    <tr><td><span class="tag p0">P0</span></td><td>指定单天在线恢复</td><td>下载 → 校验 → detach → 原子替换 → attach，失败可回滚。</td></tr>
+    <tr><td><span class="tag p0">P0</span></td><td>备份清单查询</td><td>按日期/节点列出可用备份及其大小、提交时间。</td></tr>
+    <tr><td><span class="tag p0">P0</span></td><td>完整性校验</td><td>对象存在性与大小校验（默认）、全文件哈希校验（可选）。</td></tr>
+    <tr><td><span class="tag p0">P0</span></td><td>断点续传与幂等</td><td>上传中断可续；重复备份同一天不产生脏数据。</td></tr>
+    <tr><td><span class="tag p0">P0</span></td><td>集群多节点</td><td>按 <code>cluster/node</code> 命名空间隔离，逐节点备份/恢复。</td></tr>
+    <tr><td><span class="tag p0">P0</span></td><td>可观测性</td><td>结构化日志、进度输出、稳定退出码，可被 cron/告警消费。</td></tr>
+    <tr><td><span class="tag p1">P1</span></td><td>保留策略清理</td><td>按天数或截止日期清理过期备份。</td></tr>
+    <tr><td><span class="tag p1">P1</span></td><td>常驻调度模式</td><td><code>daemon</code> 内置 cron，替代系统 crontab。</td></tr>
+    <tr><td><span class="tag p1">P1</span></td><td>恢复到新实例/异机</td><td>恢复到非原节点目录，用于演练。</td></tr>
+    <tr><td><span class="tag no">不做</span></td><td>日志内容解析、字段级筛选、单条日志恢复</td><td>恢复粒度固定为整天分区。</td></tr>
+    <tr><td><span class="tag no">不做</span></td><td>跨版本数据格式转换 / 迁移</td><td>只做字节级搬运，不重写分区内容。</td></tr>
+    <tr><td><span class="tag no">不做</span></td><td>全局时间点恢复（PITR）、跨天合并</td><td>与按天分区模型冲突。</td></tr>
+  </tbody>
+</table>
+
+<h2 id="model">4. 核心模型与术语</h2>
+<table>
+  <thead><tr><th>术语</th><th>定义</th></tr></thead>
+  <tbody>
+    <tr><td>分区（Partition）</td><td><code>partitions/YYYYMMDD</code>（UTC 日）。备份与恢复的最小单位，内部文件不可变。</td></tr>
+    <tr><td>快照（Snapshot）</td><td>VictoriaLogs 为某分区生成的硬链接视图，秒级、几乎不额外占空间。仅备份期间存在，用完即删。</td></tr>
+    <tr><td>备份单元（Backup Unit）</td><td>某节点某一天在 S3 上的一组对象：<code>files/</code> 下的数据文件 + 一个 <code>manifest.json</code>。</td></tr>
+    <tr><td>提交点（Commit）</td><td><code>manifest.json</code> 上传成功即为提交。无 manifest 的前缀一律视为未完成备份，不可用于恢复。</td></tr>
+    <tr><td>节点（Node）</td><td>单机部署时即实例本身；集群部署时为每个 <code>vlstorage</code>。备份仓库以节点为命名空间。</td></tr>
+    <tr><td>恢复点（Restore Target）</td><td>被替换的目标分区目录；替换前可保留为 <code>.replaced-&lt;ts&gt;</code> 以便回滚。</td></tr>
+  </tbody>
+</table>
+
+<h4>仓库布局（格式版本 v1）</h4>
+<pre><code>s3://&lt;bucket&gt;/&lt;prefix&gt;/v1/
+  &lt;cluster&gt;/&lt;node&gt;/&lt;YYYYMMDD&gt;/
+    manifest.json          ← 提交点，最后写入
+    files/…                ← 分区内相对路径原样保留</code></pre>
+<p>选择「原样保留相对路径」而非自定义归档格式：恢复时无需任何转换，也不依赖版本化的打包格式；单文件即不可变单元，天然支持文件级断点续传与并行。</p>
+
+<h4>分区与作业状态</h4>
+<table>
+  <thead><tr><th>对象</th><th>状态</th><th>允许的迁移</th></tr></thead>
+  <tbody>
+    <tr><td>分区</td><td>present / detached / replaced / attached</td><td>present → detached → replaced → attached；任一失败步骤必须回退到 present</td></tr>
+    <tr><td>备份作业</td><td>snapshotting / uploading / committing / committed</td><td>任意中间态 → failed / abandoned；仅 committed 可被恢复复用</td></tr>
+  </tbody>
+</table>
+
+<h2 id="fr">5. 功能需求</h2>
+
+<div class="fr">
+<h3>FR-01 备份（Backup）<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>目的</dt><dd>把指定日期分区在不停机前提下完整落到 S3，并留下可验证的提交记录。</dd>
+  <dt>触发</dt><dd><code>backup --date 2026-10-27</code>、<code>backup --from … --to …</code>、<code>backup --latest 3</code>（最近 N 个已完整落盘的天），无参数时默认「昨天（UTC）」。</dd>
+  <dt>前置校验</dt><dd>① VictoriaLogs 端点可达；② 目标分区目录存在且非空；③ 本机对该分区有读权限；④ S3 桶可写（一次 <code>HeadBucket</code>/探测写）；⑤ 本地无同分区作业锁。</dd>
+  <dt>处理规则</dt><dd>1) 调分区快照接口创建快照并记录返回路径；2) 遍历快照目录，按相对路径逐个上传到 <code>files/</code>；3) 全部对象上传成功后写入 <code>manifest.json</code>（提交）；4) 无论成功失败，最终删除快照。</dd>
+  <dt>结果</dt><dd>打印摘要：分区、文件数、总字节、耗时、跳过的已存在对象数；S3 上出现可恢复的备份单元。</dd>
+  <dt>边界</dt><dd>分区不存在 → 退出码 4；当天分区仍在写入 → 允许，但提示「快照仅包含已落盘数据，最近约 1 秒缓冲不在其中」，并提供 <code>--force-flush</code> 先落盘；已存在提交 → 按 <code>--if-exists=skip|replace</code>（默认 skip）；某文件上传失败 → 重试后仍失败则整体失败，且<b>不写 manifest</b>。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-02 快照生命周期<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>目的</dt><dd>保证备份读取的是一致视图，同时绝不让快照长期占盘。</dd>
+  <dt>规则</dt><dd>快照仅在作业内存在，作用域为单个分区；作业结束（含异常退出）必须清理。进程被强杀时来不及清理，因此每次作业启动前先清理「孤立快照」（按快照存在时长阈值判定）。</dd>
+  <dt>约束</dt><dd>不提供「长期保留快照」作为常规用法；<code>--keep-snapshot</code> 仅供排障，且必须在摘要中显式告警其占用的空间不会随保留策略释放。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-03 上传、断点续传与幂等<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>目的</dt><dd>在跨可用区/跨云的网络条件下，把「几十 GB、数万文件」稳定传完，中断后不从头再来。</dd>
+  <dt>处理规则</dt><dd>① 文件级并发（默认 8，可配）；② 单文件超过阈值走分段上传；③ 上传前对目标对象做 <code>HEAD</code>，已存在且大小一致则跳过（文件不可变，具有天然幂等性）；④ 单文件失败按指数退避重试，重试耗尽才判定作业失败；⑤ 全部完成后才写 manifest。</dd>
+  <dt>结果</dt><dd>重复执行同一天备份，除 manifest 时间戳外不产生新的数据对象。</dd>
+  <dt>边界</dt><dd>对象存在但大小不一致 → 视为残缺，重新上传覆盖；同一 <code>cluster/node/date</code> 存在并发作业 → 后启动者拒绝（退出码 6）。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-04 在线恢复指定日期<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>目的</dt><dd>把某一天的备份回灌到运行中的实例，且不影响其他日期的查询与写入。</dd>
+  <dt>触发</dt><dd><code>restore --date 2026-10-27 --yes</code>（可加 <code>--node</code> / <code>--cluster</code> / <code>--dry-run</code> / <code>--on-existing=keep|replace</code>）。</dd>
+  <dt>处理规则</dt><dd>1) 读取 manifest 并校验备份单元完整性；2) 下载全部文件到数据目录<b>之外</b>的临时目录（同一文件系统，便于原子 rename）；3) 逐文件校验大小（<code>--deep</code> 时校验哈希）；4) 若目标分区存在则 detach；5) 将临时目录 rename 为 <code>partitions/YYYYMMDD</code>，旧目录按 <code>--on-existing</code> 保留或删除；6) attach；7) 可选冒烟查询该天是否有数据返回。</dd>
+  <dt>结果</dt><dd>目标日期可查；实例进程未重启；其余日期无变化。摘要给出替换的文件数、字节数与耗时。</dd>
+  <dt>边界</dt><dd>目标分区为「今天」→ 强制二次确认并告警：覆盖后恢复点之前的实时日志会丢失；磁盘剩余空间不足分区大小 + 余量 → 前置失败（退出码 6），不开始下载；节点名与 manifest 不一致 → 默认拒绝，需 <code>--allow-node-mismatch</code>。</dd>
+  <dt>失败回滚</dt><dd>detach 之后任一步失败：若尚未替换，直接 attach 原目录；若已替换，则回滚旧目录后再 attach。回滚失败必须原样输出人工处置步骤（含具体路径与命令），不得只报「失败」。</dd>
+  <dt>权限</dt><dd>恢复属高危操作，非交互环境必须显式 <code>--yes</code>；交互环境需二次确认并回显将替换的路径。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-05 清单查询与校验<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>目的</dt><dd>回答「某天有没有备份、多大、可不可信」。</dd>
+  <dt>规则</dt><dd><code>list</code> 按节点列出已提交备份（日期、文件数、字节数、提交时间、工具版本）；<code>verify --date</code> 校验对象存在性与大小；<code>verify --date --deep</code> 下载并比对哈希。</dd>
+  <dt>结果</dt><dd>表格输出 + 稳定的退出码；任意不一致项需逐条列出（对象键、期望值、实际值）。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-06 保留清理<span class="tag p1">P1</span></h3>
+<dl>
+  <dt>规则</dt><dd><code>gc --keep-days 30</code> 或 <code>gc --before 2026-01-01</code>，仅删除已提交且满足条件者；顺带清理无 manifest 的未完成前缀。默认 <code>--dry-run</code> 列出将删对象，需 <code>--yes</code> 才真正删除。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-07 集群多节点<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>规则</dt><dd>仓库路径强制包含 <code>cluster/node</code>；单机部署可用固定值。备份可对多节点逐个执行（失败隔离，单节点失败不阻断其他节点，但整体退出码非 0）；恢复必须明确目标节点，不做「自动找节点」。</dd>
+  <dt>理由</dt><dd>集群下数据按流分散在各 <code>vlstorage</code>，只有同一节点的备份才能拼回完整的一天。</dd>
+</dl>
+</div>
+
+<div class="fr">
+<h3>FR-08 配置与凭据<span class="tag p0">P0</span></h3>
+<dl>
+  <dt>规则</dt><dd>配置来源优先级：命令行 flag &gt; 环境变量（<code>VLB_*</code>）&gt; 配置文件。必须包含：VictoriaLogs 地址与分区管理鉴权、数据目录、S3 端点/桶/前缀/区域/路径风格、并发与超时。凭据支持环境变量、共享凭据文件、实例角色三种来源。</dd>
+  <dt>安全</dt><dd>凭据不得出现在日志、摘要与错误信息中；配置文件权限不当（组/其他可读）时给出告警。</dd>
+</dl>
+</div>
+
+<h2 id="rules">6. 共享规则与异常矩阵</h2>
+<h4>提交点规则（唯一权威）</h4>
+<ul>
+  <li>只有 <code>manifest.json</code> 写入成功，备份才成立；<code>list</code>/<code>restore</code> 一律只认 manifest。</li>
+  <li>manifest 最后写入，内容包含全部对象的键、大小与哈希，因此它是「完整性声明」而不是目录清单的缓存。</li>
+  <li>重新备份同一天且内容变化时，必须先上传新对象、写入新 manifest，再清理旧 manifest 中不再被引用的对象；不得先删后传。</li>
+</ul>
+
+<h4>时间语义</h4>
+<ul>
+  <li>所有日期按 <b>UTC</b> 解释；<code>--date</code> 只接受 <code>YYYY-MM-DD</code>。</li>
+  <li>用户处于非 UTC 时区时，摘要中必须回显「本次操作对应 UTC 分区 <code>YYYYMMDD</code>」，避免选错天。</li>
+</ul>
+
+<h4>并发与锁</h4>
+<ul>
+  <li>同一 <code>cluster/node/date</code> 同一时刻仅允许一个备份或恢复作业，由本地锁文件保证。</li>
+  <li>备份与恢复可并行在不同日期上执行；恢复同一节点不同日期时逐个执行（避免同时多次 detach 干扰排障）。</li>
+</ul>
+
+<h4>异常矩阵</h4>
+<table>
+  <thead><tr><th>情况</th><th>行为</th><th>退出码</th></tr></thead>
+  <tbody>
+    <tr><td>VictoriaLogs 不可达 / 5xx</td><td>指数退避重试后失败，提示检查地址与鉴权</td><td>3</td></tr>
+    <tr><td>分区目录不存在</td><td>明确报「该 UTC 日无数据」，不创建空备份</td><td>4</td></tr>
+    <tr><td>S3 桶不存在 / 无权限</td><td>前置失败，不创建快照</td><td>6</td></tr>
+    <tr><td>上传中网络中断</td><td>保留已上传对象，作业失败；重跑时跳过已存在同大小对象</td><td>3</td></tr>
+    <tr><td>快照创建成功但上传失败</td><td>必须清理快照并提示；失败清理需告警</td><td>1</td></tr>
+    <tr><td>恢复时磁盘不足</td><td>不下载任何文件，直接失败</td><td>6</td></tr>
+    <tr><td>恢复中 attach 失败</td><td>回滚到原目录并 attach；输出人工处置步骤</td><td>1</td></tr>
+    <tr><td>校验大小/哈希不一致</td><td>列出差异项，判定备份不可用</td><td>5</td></tr>
+    <tr><td>用户取消确认</td><td>不产生任何副作用</td><td>7</td></tr>
+  </tbody>
+</table>
+
+<h2 id="constraint">7. 技术约束</h2>
+<table>
+  <thead><tr><th>类别</th><th>约束</th></tr></thead>
+  <tbody>
+    <tr><td>语言与产物</td><td>Go（1.22+），<code>CGO_ENABLED=0</code> 静态链接，单文件二进制；目标平台 linux/amd64、linux/arm64。</td></tr>
+    <tr><td>运行依赖</td><td>不依赖 <code>rsync</code>、<code>aws-cli</code>、Python 等外部程序；只使用 VictoriaLogs HTTP 端点与 S3 HTTP API。</td></tr>
+    <tr><td>VictoriaLogs 版本</td><td>需支持分区快照创建/删除与 detach/attach 端点；最低版本 <span class="tbd">[TBD]</span>，启动时探测并在不满足时拒绝执行。</td></tr>
+    <tr><td>存储兼容</td><td>AWS S3、MinIO 及 S3 兼容端点；必须支持 path-style 寻址；不依赖 S3 Select、对象锁等高级特性。</td></tr>
+    <tr><td>一致性</td><td>一致性只能来自分区快照；禁止直接拷贝正在写入的分区目录。</td></tr>
+    <tr><td>资源</td><td>流式读写，单文件不整体载入内存；内存占用随并发数线性增长且有上限；恢复所需磁盘 ≈ 分区大小 × 1.1（含旧目录保留）。</td></tr>
+    <tr><td>网络</td><td>只允许出站 HTTPS；支持代理环境变量；单请求超时与总作业超时可配。</td></tr>
+    <tr><td>权限最小集</td><td>VL 侧：分区只读 + 分区管理端点；S3 侧：<code>ListBucket</code>、<code>GetObject</code>、<code>PutObject</code>、<code>DeleteObject</code>、<code>HeadObject</code>、分段上传相关权限。</td></tr>
+    <tr><td>安全</td><td>不落盘明文凭据；恢复等高危操作需显式确认；日志脱敏。</td></tr>
+    <tr><td>规模假设</td><td>单日分区典型大小与文件数 <span class="tbd">[Assumption, TBD]</span>；设计目标为「数万文件 / 数十 GB」可稳定完成，需以实测校准并发默认值。</td></tr>
+  </tbody>
+</table>
+
+<h2 id="spec">8. 工程规范</h2>
+
+<h3>8.1 CLI 规范</h3>
+<pre><code>vlogs-backup &lt;command&gt; [flags]
+
+commands:
+  backup   备份一个或多个日期分区
+  restore  在线恢复指定日期分区
+  list     列出已提交备份
+  verify   校验备份完整性
+  gc       清理过期/未完成备份
+  version  输出版本与构建信息
+
+常用示例：
+  vlogs-backup backup --date 2026-10-27
+  vlogs-backup backup --latest 3 --if-exists skip
+  vlogs-backup backup --from 2026-10-01 --to 2026-10-07 --cluster prod --node vlstorage-0
+  vlogs-backup restore --date 2026-10-27 --node vlstorage-0 --yes
+  vlogs-backup list --from 2026-10-01 --format table|json
+  vlogs-backup verify --date 2026-10-27 --deep
+  vlogs-backup gc --keep-days 30 --dry-run</code></pre>
+<table>
+  <thead><tr><th>Flag</th><th>适用命令</th><th>默认</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>--vl-url</code></td><td>backup/restore</td><td>—</td><td>VictoriaLogs 地址，必填或由配置提供</td></tr>
+    <tr><td><code>--data-path</code></td><td>backup/restore</td><td>—</td><td>实例 <code>-storageDataPath</code>，恢复必须与运行实例一致</td></tr>
+    <tr><td><code>--cluster</code> / <code>--node</code></td><td>全部</td><td>default</td><td>仓库命名空间</td></tr>
+    <tr><td><code>--concurrency</code></td><td>backup/restore</td><td>8</td><td>文件级并发</td></tr>
+    <tr><td><code>--if-exists</code></td><td>backup</td><td>skip</td><td><code>skip</code> / <code>replace</code></td></tr>
+    <tr><td><code>--on-existing</code></td><td>restore</td><td>keep</td><td>旧分区保留为 <code>.replaced-&lt;ts&gt;</code> 或直接删除</td></tr>
+    <tr><td><code>--deep</code></td><td>verify/restore</td><td>false</td><td>启用哈希校验（更慢）</td></tr>
+    <tr><td><code>--dry-run</code></td><td>全部写操作</td><td>false</td><td>只打印将执行的动作</td></tr>
+    <tr><td><code>--yes</code></td><td>restore/gc</td><td>false</td><td>非交互确认</td></tr>
+    <tr><td><code>--json</code></td><td>全部</td><td>false</td><td>输出机器可读结果，便于 cron 告警</td></tr>
+  </tbody>
+</table>
+
+<h3>8.2 manifest（v1）字段</h3>
+<pre><code>{
+  "format_version": 1,
+  "cluster": "prod-logs",
+  "node": "vlstorage-0",
+  "partition": "20261027",
+  "created_at": "2026-10-28T01:12:03Z",
+  "snapshot_at": "2026-10-28T01:11:58Z",
+  "vl_version": "v1.xx.x",
+  "tool_version": "0.1.0",
+  "file_count": 128,
+  "total_bytes": 73400320,
+  "entries": [
+    { "path": "parts/xxxx/yyyy.bin", "size": 1048576, "sha256": "…" }
+  ]
+}</code></pre>
+<p>约定：<code>entries[].path</code> 为分区内相对路径，S3 键为 <code>files/&lt;path&gt;</code>；<code>format_version</code> 不兼容时拒绝恢复；<code>entries</code> 是完整性声明的唯一来源。</p>
+
+<h3>8.3 退出码</h3>
+<table>
+  <thead><tr><th>码</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>成功</td></tr>
+    <tr><td>1</td><td>未分类错误（含回滚失败）</td></tr>
+    <tr><td>2</td><td>参数或配置错误</td></tr>
+    <tr><td>3</td><td>远端不可达/网络失败（可重试）</td></tr>
+    <tr><td>4</td><td>目标不存在（分区或备份缺失）</td></tr>
+    <tr><td>5</td><td>校验失败（数据不一致）</td></tr>
+    <tr><td>6</td><td>前置条件不满足（磁盘/锁/权限）</td></tr>
+    <tr><td>7</td><td>用户取消</td></tr>
+  </tbody>
+</table>
+
+<h3>8.4 日志与输出</h3>
+<ul>
+  <li>结构化日志（<code>log/slog</code>），字段固定：<code>ts</code>、<code>level</code>、<code>op</code>、<code>cluster</code>、<code>node</code>、<code>partition</code>、<code>phase</code>、<code>bytes</code>、<code>files</code>、<code>err</code>。</li>
+  <li>人读输出走 stdout，进度与告警走 stderr；<code>--json</code> 时 stdout 仅一行业务结果 JSON。</li>
+  <li>任何失败必须给出「发生了什么 + 当前状态 + 建议下一步」，回滚失败需附具体命令。</li>
+</ul>
+
+<h3>8.5 Go 工程规范</h3>
+<ul>
+  <li>目录：<code>cmd/vlogs-backup</code>（入口）、<code>internal/vl</code>（端点客户端）、<code>internal/s3store</code>（对象存取与键布局）、<code>internal/backup</code>、<code>internal/restore</code>、<code>internal/manifest</code>、<code>internal/config</code>。</li>
+  <li>所有外部调用必须带 <code>context</code> 与超时；重试集中在客户端层实现（指数退避 + jitter），业务层不重复写重试。</li>
+  <li>错误必须包装上下文（<code>fmt.Errorf("…: %w", err)</code>），不得吞错；不用 <code>panic</code> 处理可预期错误。</li>
+  <li>文件系统操作使用同分区 <code>rename</code> 保证原子性；禁止跨设备移动。</li>
+  <li>测试：<code>httptest</code> 模拟 VictoriaLogs 端点覆盖快照/detach/attach 语义；S3 用 MinIO 或本地仿真实现做集成测试；回滚路径必须有专门的失败注入测试。</li>
+  <li>质量门禁：<code>gofmt</code>、<code>go vet</code>、<code>golangci-lint</code>、单测覆盖率不设数字指标但核心回滚逻辑必须覆盖。</li>
+</ul>
+
+<h3>8.6 构建与发布</h3>
+<ul>
+  <li><code>make release</code> 交叉编译 linux/amd64、linux/arm64，产物命名 <code>vlogs-backup_&lt;version&gt;_&lt;os&gt;_&lt;arch&gt;</code>，同时生成 <code>sha256sum</code>。</li>
+  <li>版本信息通过 <code>-ldflags "-X main.version=… -X main.commit=…"</code> 注入，<code>version</code> 子命令输出版本、commit、构建时间、Go 版本。</li>
+  <li>发布说明必须包含仓库格式版本号；格式不兼容变更需提升 <code>format_version</code> 并提供读取旧版本的兼容期。</li>
+</ul>
+
+<h3>8.7 运维使用约定</h3>
+<ul>
+  <li>推荐 cron：<code>0 2 * * * vlogs-backup backup --latest 1 --json</code>，失败以非 0 退出码触发告警。</li>
+  <li>备份仓库建议配置桶级生命周期仅做「归档到低频」，<b>删除交给工具自身</b>，避免 S3 生命周期与 manifest 语义冲突。</li>
+  <li>恢复后必须执行一次 <code>verify</code> 与冒烟查询；<code>.replaced-&lt;ts&gt;</code> 目录在确认无误后手工清理。</li>
+</ul>
+
+<h2 id="qa">9. 待确认问题</h2>
+<table>
+  <thead><tr><th>#</th><th>问题</th><th>影响</th></tr></thead>
+  <tbody>
+    <tr><td>Q1</td><td>分区管理端点的鉴权方式（<code>-partitionManageAuthKey</code> 的传递位置与格式）</td><td>决定 VL 客户端实现与配置项，需按实际版本核实</td></tr>
+    <tr><td>Q2</td><td>单日分区典型大小与文件数、S3 单文件最大体积</td><td>决定并发默认值、分段上传阈值与恢复磁盘检查策略</td></tr>
+    <tr><td>Q3</td><td>是否需要跨账户/跨区域灾备（多目标桶双写）</td><td>P0 只支持单目标；多目标会改变提交点语义</td></tr>
+    <tr><td>Q4</td><td>保留期对齐：备份保留多久，是否必须 ≥ <code>-retentionPeriod</code></td><td>影响 <code>gc</code> 默认值与安全护栏</td></tr>
+    <tr><td>Q5</td><td>是否需要客户端加密（SSE-C / 自有密钥）</td><td>影响恢复链路的密钥管理与故障面</td></tr>
+    <tr><td>Q6</td><td>是否需要在 Windows / macOS 运行（排障机直连数据目录）</td><td>影响路径处理与 rename 语义</td></tr>
+  </tbody>
+</table>
+
+<footer class="doc">
+  本文档聚焦产品行为与工程约束，未包含实现计划与排期。标注 <span class="tbd">[TBD]</span> 处需在评审中给出结论后再进入开发。
+</footer>
+</div>
+</body>
+</html>
