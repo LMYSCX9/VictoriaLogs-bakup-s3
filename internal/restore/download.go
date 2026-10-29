@@ -14,12 +14,12 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 )
 
 // sliceWriter 实现 io.WriterAt，把小对象（manifest）累积到内存缓冲。
-// S3 分段写入可能乱序，故按任意偏移落位、空洞补零，完整性由 manifest.Parse 校验兜底。
+// S3 分段写入可能乱序，故按任意偏移落位、空洞补零，完整性由 backupmeta.Parse 校验兜底。
 type sliceWriter struct {
 	buf []byte
 }
@@ -40,7 +40,7 @@ func (w *sliceWriter) WriteAt(p []byte, off int64) (int, error) {
 
 // downloadAll 并发下载 manifest 列出的全部文件到 tmpDir 并逐个校验（R-RS-01/03）。
 // worker 数来自配置（§8.3 默认 8）；任一文件失败即收敛整个 errgroup。
-func (j *Job) downloadAll(ctx context.Context, partition, tmpDir string, entries []manifest.Entry) error {
+func (j *Job) downloadAll(ctx context.Context, partition, tmpDir string, entries []backupmeta.Entry) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(j.opts.Concurrency)
 	for i := range entries {
@@ -53,7 +53,7 @@ func (j *Job) downloadAll(ctx context.Context, partition, tmpDir string, entries
 }
 
 // downloadOne 下载单个文件到 tmpDir 并校验 size（与 deep 时的 sha256）。
-func (j *Job) downloadOne(ctx context.Context, partition, tmpDir string, e manifest.Entry) error {
+func (j *Job) downloadOne(ctx context.Context, partition, tmpDir string, e backupmeta.Entry) error {
 	key, err := j.keys.FileKey(partition, e.Path)
 	if err != nil {
 		return errs.Untyped(err, "build key for %s", e.Path)
@@ -81,7 +81,7 @@ func (j *Job) downloadOne(ctx context.Context, partition, tmpDir string, e manif
 }
 
 // verifyFile 校验下载产物：size 恒校验；deep 时校验 sha256（R-RS-03，失败分类为 Validation → 退出码 5）。
-func verifyFile(path string, e manifest.Entry, deep bool) error {
+func verifyFile(path string, e backupmeta.Entry, deep bool) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return errs.Untyped(err, "stat %s", path)

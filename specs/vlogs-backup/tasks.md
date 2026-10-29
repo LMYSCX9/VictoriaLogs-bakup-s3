@@ -13,6 +13,7 @@
 | M3 | 恢复可用 | 单天在线恢复 E2E 通过，回滚矩阵全覆盖 |
 | M4 | 运维完备 | `setup`/`verify`/`delete`/`gc` 可用，退出码与 JSON 契约齐备 |
 | M5 | 发布 | 四平台二进制（Linux/Windows × amd64/arm64）+ 发布说明 + 运维手册 |
+| M6 | 插件协议集成 | `describe` / `run <task>` 对齐 OPS-PLUGIN-1（规范见 `docs/plugin/`），CLI 行为零破坏 |
 
 ---
 
@@ -46,7 +47,7 @@
 
 | # | 任务 | 产出 | 验收 | 依赖 |
 | --- | --- | --- | --- | --- |
-| T2.1 | manifest 契约 | `internal/manifest`：结构、校验、版本兼容 | R-MF-02、R-MF-03 | T1.3 |
+| T2.1 | manifest 契约 | `internal/backupmeta`（旧名 internal/manifest，2026-10 更名）：结构、校验、版本兼容 | R-MF-02、R-MF-03 | T1.3 |
 | T2.2 | VL 客户端 | `internal/vl`：`AuthInjector`（NoAuth/BasicAuth/BearerAuth，按 `vl_auth_mode` 动态构造标准 `Authorization` 头，不硬编码）+ snapshot create/delete/list、detach、attach、flush、能力探测 | R-OPS-04、R-OPS-08；契约测试用 `httptest`（断言三种模式的请求头与缺凭据启动失败） | T0.1 |
 | T2.3 | S3 客户端 | `internal/s3store`：Head/Put/Get/List/Delete + 分段上传 + KeyBuilder；依赖 `aws-sdk-go-v2`（config/credentials/service/s3，`UsePathStyle` 兼容自建端点，选型见设计文档 §8.4） | 键布局符合 C7；S3 兼容容器集成测试（RustFS 容器优先，备选 MinIO 归档镜像 / SeaweedFS / Garage） | T1.3 |
 | T2.4 | 作业锁 | `internal/lock`：`cluster/node/date` 互斥 | 并发启动第二个作业返回退出码 6 | T1.1 |
@@ -108,6 +109,19 @@
 
 ---
 
+## M6 插件协议集成（2026-10-29，规范见 docs/plugin/）
+
+| # | 任务 | 产出 | 验收 | 依赖 |
+| --- | --- | --- | --- | --- |
+| T6.1 | 命名隔离 | `internal/manifest` → `internal/backupmeta` 更名（避免与插件 manifest 重名），15 处 import 同步；S3 键文件名 `manifest.json` 不变 | R-PL-04：既有测试全绿 | — |
+| T6.2 | 协议结构层 | `internal/plugin`：manifest v1 结构与 `Validate()`、task 信封 `Envelope`/`ErrorInfo`、`OPS_PLUGIN_*` 环境变量名、握手行解析；纯结构体，禁止 IO | R-PL-01 结构基础；`Validate` 覆盖 name/modes/binary/task 唯一性/ui⇒daemon | T6.1 |
+| T6.3 | describe 子命令 | `cmd/vlogs-backup/describe.go`：动态构造完整 manifest JSON（6 task + config schema + permissions），secret 项仅标 `secret: true` 不含真实值 | R-PL-01（C9） | T6.2 |
+| T6.4 | run 适配层 | `cmd/vlogs-backup/plugin_run.go`：stdin JSON → argv 翻译（kebab/snake_case 等价）、自动注入 yes/json、退出码映射（设计文档 §11.2 插件映射表）、信封包装 | R-PL-02、R-PL-03、R-PL-05 | T6.3 |
+| T6.5 | 帮助页与 CLI 兼容 | `run -h` 专属帮助页；`-h` 总览列出 describe/run；既有子命令行为零破坏 | R-PL-06、R-PL-04 | T6.4 |
+| T6.6 | 协议单测补齐（2026-10-29 完成） | `internal/plugin/manifest_test.go`（Validate 边界 / ParseHandshake / ListenAddr / Env 检测）+ `cmd` 侧 `plugin_run_test.go`（jsonToArgs 类型覆盖、readTaskInput、buildTaskEnvelope 全表、runPlugin 端到端）与 `describe_test.go`（**config 默认值与 config.Default() 一致性回归**、task 清单、required/secret 标注、C9 secret 无默认值） | 覆盖 R-PL-01 ~ R-PL-06 可自动化验收项 | T6.4 |
+
+---
+
 ## 并行建议
 
 ```text
@@ -115,7 +129,7 @@ M0 ──► M1 ──┬──► M2 ──► M3 ──► M4 ──► M5
             └──► T1.x 可并行完成后，T2.1/T2.2/T2.3 三条线可并行开发
 ```
 
-- `manifest`（T2.1）、`vl`（T2.2）、`s3store`（T2.3）三者互相独立，可并行。
+- `backupmeta`（T2.1）、`vl`（T2.2）、`s3store`（T2.3）三者互相独立，可并行。
 - setup 链路（T4.2 ~ T4.5）只依赖 T1.2/T2.2/T2.3，可与 M3 并行开发。
 - M3 必须等 M2 完成，因为恢复的校验依赖备份产物的真实结构。
 - T5.4 演练不可省略：设计的并发默认值与磁盘系数（Q2）只能靠实测确认。

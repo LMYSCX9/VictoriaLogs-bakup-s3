@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
 	"github.com/vlogs-backup/vlogs-backup/internal/lock"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 	"github.com/vlogs-backup/vlogs-backup/internal/s3store"
 )
 
@@ -166,10 +166,10 @@ func newTestEnv(t *testing.T) *testEnv {
 }
 
 // putManifest 生成合法 manifest 与对应文件对象，提交到 fakeStore。
-func (env *testEnv) putManifest(partition string, files map[string]string) *manifest.Manifest {
+func (env *testEnv) putManifest(partition string, files map[string]string) *backupmeta.Manifest {
 	env.t.Helper()
-	m := &manifest.Manifest{
-		FormatVersion: manifest.FormatVersion,
+	m := &backupmeta.Manifest{
+		FormatVersion: backupmeta.FormatVersion,
 		Cluster:       "c1",
 		Node:          "n1",
 		Partition:     partition,
@@ -180,7 +180,7 @@ func (env *testEnv) putManifest(partition string, files map[string]string) *mani
 	}
 	for path, content := range files {
 		sum := sha256.Sum256([]byte(content))
-		m.Entries = append(m.Entries, manifest.Entry{
+		m.Entries = append(m.Entries, backupmeta.Entry{
 			Path:   path,
 			Size:   int64(len(content)),
 			SHA256: hex.EncodeToString(sum[:]),
@@ -200,7 +200,7 @@ func (env *testEnv) putManifest(partition string, files map[string]string) *mani
 }
 
 // putRawManifest 把 manifest 以 JSON 提交到 fakeStore（供篡改场景使用）。
-func (env *testEnv) putRawManifest(partition string, m *manifest.Manifest) {
+func (env *testEnv) putRawManifest(partition string, m *backupmeta.Manifest) {
 	env.t.Helper()
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -519,14 +519,14 @@ func TestRestorePartitionMismatchAlwaysRejected(t *testing.T) {
 func TestRestoreManifestTooNew(t *testing.T) {
 	env := newTestEnv(t)
 	m := env.putManifest(dayA, map[string]string{"data/part.0": "x"})
-	m.FormatVersion = manifest.FormatVersion + 1
+	m.FormatVersion = backupmeta.FormatVersion + 1
 	env.putRawManifest(dayA, m)
 
 	_, err := env.job.Run(context.Background(), dayA)
 	if errs.ExitCode(err) != errs.ExitValidation {
 		t.Fatalf("exit code: got %v (%v), want 5", err, errs.ExitCode(err))
 	}
-	if !errors.Is(err, manifest.ErrVersionTooNew) {
+	if !errors.Is(err, backupmeta.ErrVersionTooNew) {
 		t.Errorf("error should wrap ErrVersionTooNew: %v", err)
 	}
 }

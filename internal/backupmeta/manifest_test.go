@@ -1,4 +1,4 @@
-package manifest
+package backupmeta
 
 import (
 	"encoding/json"

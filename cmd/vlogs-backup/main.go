@@ -37,6 +37,12 @@ const usageText = `vlogs-backup — VictoriaLogs 不停机备份 / 恢复工具
   gc         清理 S3 上无 manifest 的未完成备份前缀
   version    输出版本与构建信息
 
+插件协议（OPS-PLUGIN-1，供平台底座调用）:
+  describe   输出插件 manifest JSON（stdout 单个 JSON 对象）
+  run        以 task 形态执行子命令: vlogs-backup run <task-name>
+             task 名与上述子命令同名（setup 除外）；stdin 收 JSON 参数，
+             stdout 输出单个结果信封；非交互确认自动注入
+
 --config 可放在子命令之前（全局形式）或子命令之后；两者同用时子命令形式优先。
 运行 "vlogs-backup <command> -h" 查看子命令参数。`
 
@@ -80,6 +86,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "version":
 		return runVersion(rest, stdout, stderr)
+	case "describe":
+		return runDescribe(stdout, stderr)
+	case "run":
+		// vlogs-backup run <task-name>（插件协议，OPS-PLUGIN-1）；
+		// 帮助页（run -h）与缺参处理统一由 runPlugin 兜底。
+		return runPlugin(rest, stdin, stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprintln(stdout, usageText)
 		return errs.ExitOK

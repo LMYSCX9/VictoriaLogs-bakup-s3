@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
 	"github.com/vlogs-backup/vlogs-backup/internal/lock"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 	"github.com/vlogs-backup/vlogs-backup/internal/s3store"
 	"github.com/vlogs-backup/vlogs-backup/internal/vl"
 )
@@ -46,7 +46,7 @@ type Options struct {
 	S3Prefix     string // 键前缀，可为空
 	Concurrency  int    // 上传 worker 数；<=0 时默认 8（§8.3）
 	IfExists     string // IfExistsSkip（默认）| IfExistsReplace
-	ToolVersion  string // 写入 manifest.tool_version
+	ToolVersion  string // 写入 backupmeta.tool_version
 	KeepSnapshot bool   // --keep-snapshot：排障保留快照（R-BK-07，摘要必须提示占用）
 	// OrphanSnapshotAge 是孤立快照年龄阈值（R-BK-07）；<=0 时默认 2h。
 	OrphanSnapshotAge time.Duration
@@ -216,14 +216,14 @@ func (j *Job) Run(ctx context.Context, partition string) (*Result, error) {
 	res.Skipped = skipped
 
 	// manifest 最后写入（C3 唯一提交点）：仅在全部数据对象就绪后上传。
-	entries := make([]manifest.Entry, len(scanned))
+	entries := make([]backupmeta.Entry, len(scanned))
 	var total int64
 	for i, e := range scanned {
 		entries[i] = e.Entry
 		total += e.Size
 	}
-	m := manifest.Manifest{
-		FormatVersion: manifest.FormatVersion,
+	m := backupmeta.Manifest{
+		FormatVersion: backupmeta.FormatVersion,
 		Cluster:       j.opts.Cluster,
 		Node:          j.opts.Node,
 		Partition:     partition,
@@ -337,7 +337,7 @@ func (j *Job) cleanupSnapshots(ctx context.Context, paths []string, res *Result)
 
 // pruneStale 在 replace 提交新 manifest 后清理不再被引用的旧对象。
 // 只告警不失败：新备份已完整可用，孤儿对象由后续 replace 或 gc 兜底。
-func (j *Job) pruneStale(ctx context.Context, partition string, m *manifest.Manifest, mkey string) {
+func (j *Job) pruneStale(ctx context.Context, partition string, m *backupmeta.Manifest, mkey string) {
 	unit, err := j.keys.UnitPrefix(partition)
 	if err != nil {
 		j.warn(ctx, "replace cleanup skipped", "partition", partition, "err", err)

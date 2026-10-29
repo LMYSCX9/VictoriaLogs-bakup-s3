@@ -16,9 +16,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
 	"github.com/vlogs-backup/vlogs-backup/internal/lock"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 	"github.com/vlogs-backup/vlogs-backup/internal/s3store"
 	"github.com/vlogs-backup/vlogs-backup/internal/vl"
 )
@@ -212,7 +212,7 @@ func (j *Job) Run(ctx context.Context, partition string) (Result, error) {
 	if err := j.store.Get(ctx, mkey, mw); err != nil {
 		return res, errs.Network(err, "get manifest %s", mkey)
 	}
-	m, err := manifest.Parse(mw.buf)
+	m, err := backupmeta.Parse(mw.buf)
 	if err != nil {
 		return res, errs.Validation(err, "parse manifest %s", mkey)
 	}

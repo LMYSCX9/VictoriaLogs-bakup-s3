@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 )
 
 // sweepOrphanSnapshots 清理孤立快照（R-BK-07、设计文档 §7.6）：
@@ -120,7 +120,7 @@ func scanSnapshotDirs(dirs []string) ([]entryWithPath, error) {
 				return err
 			}
 			scanned = append(scanned, entryWithPath{
-				Entry: manifest.Entry{Path: rel, Size: info.Size(), SHA256: sum},
+				Entry: backupmeta.Entry{Path: rel, Size: info.Size(), SHA256: sum},
 				local: path,
 			})
 			return nil

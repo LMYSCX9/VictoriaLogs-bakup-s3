@@ -59,11 +59,12 @@ VictoriaLogs（下称 VL）的数据以 UTC 天为单位落到 `<storageDataPath
 ```mermaid
 flowchart LR
     subgraph CLI["vlogs-backup (单二进制)"]
-        CMD[cmd: setup/backup/restore/list/verify/delete/gc]
+        CMD[cmd: setup/backup/restore/list/verify/delete/gc<br/>插件协议: describe/run task]
         BK[internal/backup]
         RS[internal/restore]
         SU[internal/setup]
-        MF[internal/manifest]
+        MF[internal/backupmeta]
+        PL[internal/plugin]
         ST[internal/s3store]
         VL[internal/vl]
         CFG[internal/config]
@@ -77,6 +78,7 @@ flowchart LR
         BK --> VL
         RS --> VL
         CMD --> CFG
+        CMD --> PL
     end
     VL -->|HTTP: snapshot/detach/attach| VLS[(VictoriaLogs)]
     ST -->|HTTPS: Put/Get/List| S3[(S3 / RustFS)]
@@ -88,9 +90,10 @@ flowchart LR
 
 | 层 | 包 | 职责 | 不做什么 |
 | --- | --- | --- | --- |
-| 入口层 | `cmd/vlogs-backup` | 参数解析、确认交互、退出码映射、输出格式 | 不写业务逻辑 |
+| 入口层 | `cmd/vlogs-backup` | 参数解析、确认交互、退出码映射、输出格式；插件协议入口（`describe` / `run <task>`，JSON→argv 翻译与信封包装） | 不写业务逻辑 |
 | 编排层 | `internal/backup`、`internal/restore` | 作业状态机、步骤编排、回滚 | 不直接拼 HTTP 请求 |
-| 契约层 | `internal/manifest` | 备份单元描述、完整性声明、版本兼容 | 不做 IO |
+| 契约层 | `internal/backupmeta` | 备份单元描述、完整性声明、版本兼容（旧名 `internal/manifest`） | 不做 IO |
+| 契约层 | `internal/plugin` | 插件协议（OPS-PLUGIN-1）结构体与常量：manifest v1、task 信封、环境变量名 | 不做 IO |
 | 访问层 | `internal/vl`、`internal/s3store` | 端点调用、键布局、重试、分片上传 | 不感知业务语义 |
 | 配置层 | `internal/config` | 多来源配置合并、凭据解析、校验 | 不落盘明文凭据 |
 
@@ -436,7 +439,8 @@ type ObjectStore interface {
 | `internal/setup` | `Wizard`、`Prompter` | 交互式初始化向导：逐项询问、连通性验证、渲染并写入 `config.toml` 与 `credentials`；输入经由 `Prompter` 接口注入，便于测试 |
 | `internal/vl` | `Client` | 端点封装、鉴权头注入、5xx 退避重试、响应解析 |
 | `internal/s3store` | `Store` | `KeyBuilder` 统一生成键；分段上传阈值与分片大小可配 |
-| `internal/manifest` | `Manifest`、`Verify()` | 结构定义、版本兼容、完整性比对 |
+| `internal/backupmeta` | `Manifest`、`Parse()`、`CheckVersion()` | S3 备份单元 manifest 结构定义、版本兼容、完整性校验（旧名 `internal/manifest`，2026-10 为避免与插件 manifest 重名而更名）；纯结构体，禁止 import IO 包 |
+| `internal/plugin` | `Manifest`、`Envelope`、`ErrorInfo`、`ParseHandshake()`、`IsPluginEnv()` | 插件协议（OPS-PLUGIN-1）纯结构体与常量：插件 manifest v1 结构与校验、task 输出信封与错误码、`OPS_PLUGIN_*` 环境变量名、握手行解析；协议规范见 `docs/plugin/`；纯结构体，禁止 import IO 包 |
 | `internal/errs` | `Error`、`ExitCode()` | 退出码契约常量（§11.2）与错误分类构造器；`ExitCode(err)` 从错误链提取退出码；纯函数，禁止 import 任何 IO 包 |
 | `internal/backup` | `Job` | 状态机与步骤编排，负责快照清理与摘要生成 |
 | `internal/restore` | `Job` | 状态机、磁盘预检、临时目录、原子替换、回滚 |
@@ -609,6 +613,18 @@ type ObjectStore interface {
 | 6 | 前置条件不满足 | 磁盘不足、锁冲突、桶不可写 |
 | 7 | 用户取消 | 交互确认拒绝 |
 
+**插件协议退出码映射**（`describe` / `run <task>` 子命令，规范见 `docs/plugin/handshake-protocol.md` §3.3）：
+进程以插件协议模式退出时，按上表原始退出码分类映射为协议退出码后返回，属于协议层翻译，不改变上表语义本身：
+
+| 协议退出码 | 来源（§11.2 原始码） | 说明 |
+| --- | --- | --- |
+| 0 | 0 | 成功 |
+| 1 | 其他未列举码 | 未分类崩溃 |
+| 2 | 2、7 | 输入错误（INPUT_INVALID） |
+| 3 | 1、3、4、5、6 | 执行失败（EXEC_FAILED）；网络类（3）标 `retryable=true` |
+| 4 | — | 权限拒绝（当前工具不产生） |
+| 124 | — | 超时（由底座强杀产生，工具自身不返回） |
+
 ### 11.3 摘要内容
 
 备份：分区、文件数、总字节、跳过对象数、耗时、快照是否已清理。
@@ -743,6 +759,14 @@ vlogs-backup <command> [flags]
   delete     删除本地指定日期的分区数据（不可恢复，需确认）
   gc         清理 S3 上无 manifest 的未完成备份前缀（过期淘汰交给 S3 生命周期，见 §7.7）
   version    输出版本与构建信息
+
+插件协议（OPS-PLUGIN-1，规范见 docs/plugin/）:
+  describe   输出插件 manifest JSON（stdout 单个 JSON 对象；各 task 参数
+             schema 与 config schema 的权威来源）
+  run        以 task 形态执行子命令: vlogs-backup run <task-name>
+             可用 task: backup / restore / list / verify / delete / gc
+             （setup 为交互向导、version 无参数，均不提供 task 形态）
+             stdin 收 JSON 参数，stdout 出单个信封；退出码映射见 §11.2
 ```
 
 | flag | 适用 | 默认 | 说明 |

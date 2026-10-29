@@ -41,13 +41,14 @@
 ## 4. 架构边界（不可跨越）
 
 ```text
-cmd/vlogs-backup      → 只做参数解析 / 确认交互 / 退出码映射 / 输出渲染
-internal/backup       → 备份状态机；依赖 vl、s3store、manifest、lock
-internal/restore      → 恢复状态机与回滚；依赖 vl、s3store、manifest、lock
+cmd/vlogs-backup      → 只做参数解析 / 确认交互 / 退出码映射 / 输出渲染；含插件协议入口（describe / run <task>）
+internal/backup       → 备份状态机；依赖 vl、s3store、backupmeta、lock
+internal/restore      → 恢复状态机与回滚；依赖 vl、s3store、backupmeta、lock
 internal/purge        → 本地分区删除：detach → rename 出 partitions/ → 递归删除 → 复查；负责确认提示内容
 internal/prune        → S3 备份单元清理（gc 专用）；先删 manifest 再删数据
-internal/verify       → 备份单元在线清单与完整性校验（list/verify）；依赖 s3store、manifest
-internal/manifest     → 纯结构体与校验；禁止 import 任何 IO 包
+internal/verify       → 备份单元在线清单与完整性校验（list/verify）；依赖 s3store、backupmeta
+internal/backupmeta   → S3 备份单元 manifest 的纯结构体与校验（旧名 internal/manifest，2026-10 为避免与插件 manifest 重名而更名）；禁止 import 任何 IO 包
+internal/plugin       → 插件协议（OPS-PLUGIN-1）纯结构体与常量：manifest v1 结构、task 信封、环境变量名；禁止 import 任何 IO 包
 internal/errs         → 退出码契约与错误分类；纯函数，禁止 import 其他 internal 包
 internal/vl           → VL HTTP 客户端；只认端点，不认业务语义
 internal/s3store      → S3 客户端与键布局；只认键，不认业务语义

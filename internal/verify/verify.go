@@ -18,8 +18,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 	"github.com/vlogs-backup/vlogs-backup/internal/s3store"
 )
 
@@ -194,7 +194,7 @@ func (j *Job) Run(ctx context.Context, partition string) (*Result, error) {
 }
 
 // checkOne 校验单个对象：HEAD 比对 size；Deep 时下载全量比对 sha256。
-func (j *Job) checkOne(ctx context.Context, partition string, e manifest.Entry, deep bool) (string, verdict, error) {
+func (j *Job) checkOne(ctx context.Context, partition string, e backupmeta.Entry, deep bool) (string, verdict, error) {
 	key, err := j.keys.FileKey(partition, e.Path)
 	if err != nil {
 		return e.Path, verdictOK, errs.Validation(err, "build key for %s", e.Path)
@@ -222,13 +222,13 @@ func (j *Job) checkOne(ctx context.Context, partition string, e manifest.Entry, 
 }
 
 // fetchManifest 下载并解析 manifest（Parse 内含版本与完整性校验，失败归类为校验失败，退出码 5）。
-func (j *Job) fetchManifest(ctx context.Context, mkey string, size int64) (*manifest.Manifest, error) {
+func (j *Job) fetchManifest(ctx context.Context, mkey string, size int64) (*backupmeta.Manifest, error) {
 	buf := make([]byte, 0, max64(size, 512))
 	w := &sliceWriter{buf: buf}
 	if err := j.store.Get(ctx, mkey, w); err != nil {
 		return nil, errs.Network(err, "get manifest %s", mkey)
 	}
-	m, err := manifest.Parse(w.buf)
+	m, err := backupmeta.Parse(w.buf)
 	if err != nil {
 		return nil, errs.Validation(err, "parse manifest %s", mkey)
 	}
@@ -251,7 +251,7 @@ const (
 )
 
 // sliceWriter 实现 io.WriterAt，把小对象（manifest）累积到内存缓冲。
-// S3 分段写入可能乱序，故按任意偏移落位、空洞补零，完整性由 manifest.Parse 兜底。
+// S3 分段写入可能乱序，故按任意偏移落位、空洞补零，完整性由 backupmeta.Parse 兜底。
 type sliceWriter struct {
 	buf []byte
 }

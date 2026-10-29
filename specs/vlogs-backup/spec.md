@@ -1,7 +1,7 @@
 # spec.md —— vlogs-backup 需求规格
 
 > 本文件承载**可验证的需求条目**。设计实现细节见 `docs/design/victorialogs-s3-backup-design.md`，硬约束见 `AGENTS.md` §3。
-> 编号规则：`R-<域>-<序号>`。域：`SU` 配置初始化、`BK` 备份、`RS` 恢复、`MF` 清单、`GC` S3 清理、`DEL` 本地分区删除、`OPS` 运维接口。
+> 编号规则：`R-<域>-<序号>`。域：`SU` 配置初始化、`BK` 备份、`RS` 恢复、`MF` 清单、`GC` S3 清理、`DEL` 本地分区删除、`OPS` 运维接口、`PL` 插件协议。
 > 任何代码改动都应能指回至少一条 R 编号；指不回说明要么缺需求、要么改动越界。
 
 ## 0. 验收总则
@@ -391,3 +391,54 @@
 2. 本地 30 天清理由调度侧调用本工具 `delete` 实现，禁止依赖 VL retention 自动清理本地分区。
 3. 过期备份淘汰交给 S3 桶生命周期规则；`gc` 不提供按保留期删除完整单元的能力（R-GC-04）。
 4. `restore` 对超出 `vl_retention_days`（默认 181）窗口的目标直接拒绝（R-RS-10，退出码 6）。
+
+---
+
+## 9. 插件协议（PL）
+
+> 规范文档（权威）：[manifest-spec.md](../../docs/plugin/manifest-spec.md)（插件 manifest v1）与 [handshake-protocol.md](../../docs/plugin/handshake-protocol.md)（OPS-PLUGIN-1）。
+> 本域描述 vlogs-backup 作为插件被平台底座集成时的行为。**不改变既有 R 条目定义的 CLI 行为**；既有子命令在 task 形态下的业务语义与其 CLI 形态完全一致。
+
+### R-PL-01 describe 输出
+
+**当**执行 `vlogs-backup describe` **时**，系统应在退出码 0 下向 stdout 输出恰好一个 UTF-8 JSON 对象（插件 manifest v1），stderr 不承载协议输出。
+
+验收：
+- 输出经单次 JSON 解析成功，`manifestVersion=1`、`modes=["task"]`；
+- 含 6 个 task（backup/restore/list/verify/delete/gc），每个 task 有 name/title/input schema/timeout；
+- config schema 中 secret 项（`s3_secret_key`、`vl_password`、`vl_token`）标记 `secret: true`，且输出不含任何真实凭据值（C9）；
+- manifest 通过 `internal/plugin` 的 `Validate()`（name/modes/binary.path/task 名唯一性/ui⇒daemon 约束）。
+
+### R-PL-02 run 信封协议
+
+**当**执行 `vlogs-backup run <task-name>` **时**，系统应从 stdin 读取一个 JSON 对象并翻译为对应子命令的 flag argv（JSON key 的 kebab-case 与 snake_case 等价），向 stdout 输出恰好一个 JSON 信封，随后退出。
+
+验收：
+- 成功：`{"ok": true, "data": <摘要 JSON>}`；失败：`{"ok": false, "error": {"code", "message", "retryable"}}`；
+- stdout 除该信封外无任何其他内容；日志与进度一律走 stderr；
+- 退出码映射符合设计文档 §11.2 插件协议映射表（原始 2/7→协议 2；原始 3→协议 3 且 retryable=true；原始 0→协议 0 等）；
+- 未知 task 名返回协议退出码 2。
+
+### R-PL-03 非交互注入与护栏保留
+
+**当**以 task 形态执行 restore/delete **时**，系统应自动注入非交互默认值（`yes=true`、`json=true`），等价于非 TTY 确认路径（C10）；**且**危险开关（`force-today`、`force-no-backup`）不得被默认放行，仍需调用方在输入 JSON 中显式给出。
+
+验收：`run restore` 恢复 UTC 今天分区且未传 `force_today` 时被拒（协议退出码 2，INPUT_INVALID）；显式传入后行为与 CLI `restore --yes --force-today` 一致。
+
+### R-PL-04 原子命令 CLI 兼容
+
+**系统应**保证新增 `describe` / `run` 子命令不改变既有 7 个子命令的参数解析、输出格式与退出码语义（R-OPS-01/02 不受影响）。
+
+验收：`backup -h`、`restore -h`、`version`、`--help` 的输出与改造前一致；既有表驱动测试全部通过。
+
+### R-PL-05 setup 无 task 形态
+
+**系统应**不提供 `run setup`：执行时返回协议退出码 2，并在 stderr 说明 setup 为交互式向导、不适合 task 形态。
+
+验收：`echo '{}' | vlogs-backup run setup` 退出码 2，无信封写入 stdout。
+
+### R-PL-06 帮助页
+
+**系统应**在 `vlogs-backup -h` 中列出 `describe` 与 `run`；`run -h` / `run --help` / `run help` 向 stdout 输出 run 专属帮助页（退出码 0），内容含可用 task 清单、stdin JSON 输入格式、信封格式与退出码表，并注明各 task 的完整参数 schema 以 `describe` 输出为权威来源；`run` 缺 task 名时向 stderr 输出该帮助页（退出码 2）。
+
+验收：`vlogs-backup run -h` 退出码 0 且 stdout 非空；帮助文本含 `backup`、`restore`、`describe` 关键字。

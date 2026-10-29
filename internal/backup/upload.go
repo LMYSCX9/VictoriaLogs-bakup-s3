@@ -7,13 +7,13 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 )
 
 // entryWithPath 是待上传文件：manifest 条目 + 快照内绝对路径。
 type entryWithPath struct {
-	manifest.Entry
+	backupmeta.Entry
 	local string
 }
 

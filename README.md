@@ -30,7 +30,8 @@
 
 - 把按 UTC 天分区的历史日志**备份**到 S3 兼容对象存储（生产为 RustFS）；
 - 按**指定日期**把某天日志**在线恢复**回 VL（detach → 替换 → attach，不重启进程）；
-- 提供**校验、本地删除、S3 清理**等运维原子能力。
+- 提供**校验、本地删除、S3 清理**等运维原子能力；
+- 同时暴露**插件协议**（`describe` / `run <task>`，OPS-PLUGIN-1），可被平台底座作为插件集成调用（见 §6.10）。
 
 工具不解析日志内容，备份/恢复的最小粒度是**一整天分区**。冷热分层（30 天本地保留、冷层落 S3）不是内置流水线，而是由你的调度侧把 `backup → delete` 等原子命令编排起来实现。
 
@@ -171,6 +172,29 @@ vl_token      = "..."   # bearer 模式
 鉴权组合校验：`basic` 必须提供用户名+密码；`bearer` 必须提供 token，否则启动即退出码 2。
 
 ## 6. 子命令详解
+
+### 6.0 命令树总览
+
+```text
+vlogs-backup
+│
+├── setup                交互式初始化向导（必须 TTY；无 task 形态）
+├── backup               在线备份（CLI 形态，详见 6.2）
+├── restore              在线恢复（CLI 形态，详见 6.3）
+├── list                 列举已提交备份（CLI 形态，详见 6.4）
+├── verify               校验备份完整性（CLI 形态，详见 6.5）
+├── delete               删除本地分区（CLI 形态，详见 6.6）
+├── gc                   清理 S3 未完成前缀（CLI 形态，详见 6.7）
+├── version              版本自检（仅 CLI，无 task 形态）
+│
+└── 插件协议（OPS-PLUGIN-1，详见 6.10）
+    ├── describe         输出插件 manifest JSON（stdout 单个 JSON 对象）
+    └── run <task-name>  task 形态执行子命令，stdin 收 JSON、stdout 出信封
+        可用 task：backup / restore / list / verify / delete / gc
+        （setup 为交互向导、version 无参数，均不提供 task 形态）
+```
+
+两种形态的分工：**CLI 形态**给人与 cron/脚本用（flag 参数、表格摘要）；**task 形态**给平台底座调用（JSON 参数、信封输出）。同一命令的业务行为（护栏、确认矩阵、退出码语义）在两种形态下完全一致。
 
 ### 6.1 setup —— 交互式初始化
 
@@ -444,6 +468,65 @@ vlogs-backup version [--json]
 - 日志（slog 文本、含时间戳/op/cluster/node）全部走 **stderr**，stdout 只有摘要，方便管道与重定向；
 - 路径与错误信息带绝对路径，便于直接定位。
 
+### 6.10 插件协议（describe / run）
+
+> 规范文档：[manifest-spec.md](docs/plugin/manifest-spec.md)、[handshake-protocol.md](docs/plugin/handshake-protocol.md)（OPS-PLUGIN-1）。
+> 本组子命令供平台底座把 vlogs-backup 作为插件集成时调用；不影响上述 CLI 子命令的任何行为。
+
+#### describe —— 输出插件 manifest
+
+```bash
+vlogs-backup describe
+```
+
+退出码 0 时向 stdout 输出**恰好一个** JSON 对象（插件 manifest v1），包含：6 个 task 声明（含每个 task 的 JSON Schema 参数说明与超时）、完整 config schema（secret 项标记 `"secret": true`，不含真实凭据值）、permissions。stderr 不承载协议输出。
+
+各 task 的**参数文档以 describe 输出为权威来源**（`run` 的参数名、类型、枚举、默认值都在其中）。
+
+#### run —— task 形态执行子命令
+
+```bash
+echo '{"date": "2026-10-27", "dry_run": true}' | vlogs-backup run backup
+```
+
+- **输入**：stdin 传一个 JSON 对象，key 为该 task 的参数名（与 CLI flag 同名，kebab-case / snake_case 等价，如 `if-exists` 与 `if_exists`）；无参数传 `{}` 或留空；
+- **输出**：stdout 恰好一个 JSON 信封；日志与进度一律走 stderr：
+
+```json
+{"ok": true,  "data": { "op": "backup", "status": "success", ... }}
+{"ok": false, "error": {"code": "INPUT_INVALID", "message": "...", "retryable": false}}
+```
+
+- **帮助**：`vlogs-backup run -h`（或 `--help` / `help`）输出专属帮助页；`run` 缺 task 名也输出帮助（退出码 2）。
+
+**task 形态的自动注入与护栏**（业务护栏与 CLI 形态完全一致，只改变确认方式）：
+
+| 注入项 | 范围 | 说明 |
+| --- | --- | --- |
+| `json=true` | 全部 task，强制注入不可覆盖 | 信封包装依赖单行 JSON 输出 |
+| `yes=true` | 仅 restore / delete，可被显式传入覆盖 | 等价非 TTY 确认路径 |
+
+危险开关**不做默认放行**：`run restore` 恢复 UTC 今天分区仍需显式传 `"force_today": true`；`run delete` 无备份分区仍需 `"force_no_backup": true`；`run gc` 默认仍是演练，真删需 `"yes": true`。
+
+#### 插件协议退出码
+
+进程以 task 形态退出时，按 §7 的原始退出码分类映射为协议退出码：
+
+| 协议退出码 | 来源（§7 原始码） | 信封 error.code |
+| --- | --- | --- |
+| 0 | 0 | —（ok=true） |
+| 1 | 其他未列举码 | EXEC_FAILED |
+| 2 | 2、7 | INPUT_INVALID |
+| 3 | 1、3、4、5、6 | EXEC_FAILED（原始 3 时 `retryable=true`） |
+| 4 | — | PERMISSION_DENIED（当前工具不产生） |
+| 124 | — | 由底座超时强杀产生 |
+
+#### 底座集成要点
+
+- 底座通过 `describe` 完成安装校验与扩展点注册（manifest v1 校验规则见规范文档）；
+- 底座通过 `run <task>` 调用业务能力，按信封 `ok` 字段判定结果、按协议退出码触发重试/告警；
+- 配置经底座注入（`<DATA_DIR>/config.json` 文件或 `OPS_PLUGIN_CONFIG` 环境变量，语义等价），config schema 见 describe 输出。
+
 ## 7. 退出码总表
 
 cron / 告警消费的唯一依据，语义固定不得复用：
@@ -461,9 +544,11 @@ cron / 告警消费的唯一依据，语义固定不得复用：
 
 批量作业（backup/delete）按天独立执行，最终退出码取各天中的**最大值**；单天失败不中断其他天。
 
+> 插件协议形态（`run <task>`）的进程退出码按上表分类映射为协议退出码（0/1/2/3/4/124），映射表见 §6.10；cron/告警消费 CLI 形态时直接使用上表原始码。
+
 ## 8. JSON 输出契约
 
-所有命令 `--json` 时 stdout 只有一行（批量作业每天一行）JSON 摘要。基础字段：
+所有命令 `--json` 时 stdout 只有一行（批量作业每天一行）JSON 摘要。**例外**：`describe` 输出单个 manifest JSON 对象、`run <task>` 输出单个信封（均见 §6.10），不遵循本节契约；下表适用于其余子命令。基础字段：
 
 | 字段 | 说明 |
 | --- | --- |

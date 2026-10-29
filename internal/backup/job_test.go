@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vlogs-backup/vlogs-backup/internal/backupmeta"
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
 	"github.com/vlogs-backup/vlogs-backup/internal/lock"
-	"github.com/vlogs-backup/vlogs-backup/internal/manifest"
 	"github.com/vlogs-backup/vlogs-backup/internal/s3store"
 )
 
@@ -267,7 +267,7 @@ func TestRunHappyPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("manifest %s must exist after successful run", mkey)
 	}
-	var got manifest.Manifest
+	var got backupmeta.Manifest
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("manifest is not valid json: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestRunReplace(t *testing.T) {
 	if !ok {
 		t.Fatal("new manifest must be committed")
 	}
-	var got manifest.Manifest
+	var got backupmeta.Manifest
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("new manifest invalid: %v", err)
 	}

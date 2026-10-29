@@ -1,6 +1,7 @@
-// Package manifest 定义 S3 备份单元的 manifest 结构与校验规则（设计文档 §6.2）。
+// Package backupmeta 定义 S3 备份单元的 manifest 结构与校验规则（设计文档 §6.2）。
 // 本包为纯结构体与校验，禁止 import 任何 IO 包；编解码仅面向内存字节。
-package manifest
+// 旧名 internal/manifest，为避免与插件规范的 manifest（自我介绍 JSON）重名，2026-10 更名为 backupmeta。
+package backupmeta
 
 import (
 	"encoding/hex"
