@@ -34,8 +34,11 @@ type BackupChecker interface {
 	Head(ctx context.Context, key string) (s3store.ObjectMeta, bool, error)
 }
 
-// 编译期断言：*s3store.Store 满足窄接口。
-var _ BackupChecker = (*s3store.Store)(nil)
+// 编译期断言：*s3store.Store 与 *s3store.LocalStore 均满足窄接口。
+var (
+	_ BackupChecker = (*s3store.Store)(nil)
+	_ BackupChecker = (*s3store.LocalStore)(nil)
+)
 
 // Options 是 Job 的构造参数；凭据不经过本包（C9）。
 type Options struct {

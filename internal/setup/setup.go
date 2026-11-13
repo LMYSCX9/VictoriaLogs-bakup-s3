@@ -28,29 +28,32 @@ const probeTimeout = 10 * time.Second
 
 // Answers 收集向导的全部应答；带「敏感」注释的字段禁止进入任何输出（C9）。
 type Answers struct {
-	VLURL       string
-	AuthMode    string
-	VLUsername  string
-	VLPassword  string // 敏感
-	VLToken     string // 敏感
-	DataPath    string
-	Cluster     string
-	Node        string
-	S3Endpoint  string
-	S3Region    string
-	S3Bucket    string
-	S3Prefix    string
-	S3PathStyle bool
-	S3AccessKey string // 敏感
-	S3SecretKey string // 敏感
+	VLURL           string
+	AuthMode        string
+	VLUsername      string
+	VLPassword      string // 敏感
+	VLToken         string // 敏感
+	DataPath        string
+	Cluster         string
+	Node            string
+	StorageType     string
+	LocalBackupPath string
+	S3Endpoint      string
+	S3Region        string
+	S3Bucket        string
+	S3Prefix        string
+	S3PathStyle     bool
+	S3AccessKey     string // 敏感
+	S3SecretKey     string // 敏感
 }
 
 // Options 是向导的运行参数。
 type Options struct {
-	OutputDir string // 空 → DefaultOutputDir
-	SkipCheck bool   // 跳过连通性验证（R-SU-04）
-	Stdout    io.Writer
-	Stderr    io.Writer
+	OutputDir    string // 空 → DefaultOutputDir
+	SkipCheck    bool   // 跳过连通性验证（R-SU-04）
+	Stdout       io.Writer
+	Stderr       io.Writer
+	ForceBackend string // "s3" → 强制 S3 后端，跳过后端选择；"local" → 强制本地；"" → legacy 先问后端
 }
 
 // Wizard 是交互式初始化向导（设计文档 §8.2）。
@@ -149,17 +152,23 @@ probe:
 	}
 }
 
-// probeAll 依次探测 VL 与 S3；探测本身不重试（交互场景快速失败）。
+// probeAll 依次探测 VL 与存储后端；探测本身不重试（交互场景快速失败）。
 func (w *Wizard) probeAll(ctx context.Context, a *Answers) error {
-	checkVL, checkS3 := w.checkVL, w.checkS3
+	checkVL := w.checkVL
 	if checkVL == nil {
 		checkVL = defaultCheckVL
 	}
-	if checkS3 == nil {
-		checkS3 = defaultCheckS3
-	}
 	if err := checkVL(ctx, a); err != nil {
 		return fmt.Errorf("vl: %w", err)
+	}
+
+	if a.StorageType == config.StorageTypeLocal {
+		return defaultCheckLocal(ctx, a)
+	}
+	// S3
+	checkS3 := w.checkS3
+	if checkS3 == nil {
+		checkS3 = defaultCheckS3
 	}
 	if err := checkS3(ctx, a); err != nil {
 		return fmt.Errorf("s3: %w", err)
@@ -181,6 +190,23 @@ func defaultCheckVL(ctx context.Context, a *Answers) error {
 	defer cancel()
 	_, err = client.SnapshotList(pctx)
 	return err
+}
+
+// defaultCheckLocal 验证本地备份目录可创建且可写（R-SU-04 本地分支）。
+func defaultCheckLocal(ctx context.Context, a *Answers) error {
+	if a.LocalBackupPath == "" {
+		return fmt.Errorf("local_backup_path is empty")
+	}
+	if err := os.MkdirAll(a.LocalBackupPath, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", a.LocalBackupPath, err)
+	}
+	// 写一个临时文件验证可写，然后立刻删除。
+	tmp := filepath.Join(a.LocalBackupPath, ".setup-probe")
+	if err := os.WriteFile(tmp, []byte("probe"), 0o644); err != nil {
+		return fmt.Errorf("write probe to %s: %w", a.LocalBackupPath, err)
+	}
+	_ = os.Remove(tmp)
+	return nil
 }
 
 // defaultCheckS3 走 HeadBucket（R-SU-04）。
@@ -211,6 +237,17 @@ func (w *Wizard) hint(text string) {
 // ask 按设计文档 §10.3 的固定顺序逐项询问并写入 a；每项前输出一行中文说明（R-SU-02）。
 func (w *Wizard) ask(a *Answers) error {
 	var err error
+
+	// 后端选择：legacy 模式先问；ForceBackend 非空时直接使用。
+	switch w.opts.ForceBackend {
+	case config.StorageTypeLocal, config.StorageTypeS3:
+		a.StorageType = w.opts.ForceBackend
+	default:
+		w.hint("备份存储后端：s3=S3 兼容对象存储，local=本地文件系统目录")
+		if a.StorageType, err = w.askBackend(); err != nil {
+			return err
+		}
+	}
 
 	// 1. VL 地址（URL 校验，不合法重输）
 	w.hint("VL 服务的 HTTP 地址：直连形如 http://<IP>:9428；经 vmauth 代理时填代理地址（可含路径前缀）")
@@ -248,7 +285,7 @@ func (w *Wizard) ask(a *Answers) error {
 	}
 
 	// 4. cluster / node
-	w.hint("集群标识：写入 S3 键用于多套集群隔离，单集群保持默认即可")
+	w.hint("集群标识：写入键用于多套集群隔离，单集群保持默认即可")
 	if a.Cluster, err = w.askLine("cluster", "default"); err != nil {
 		return err
 	}
@@ -257,6 +294,17 @@ func (w *Wizard) ask(a *Answers) error {
 		return err
 	}
 
+	// 后端专属问题
+	if a.StorageType == config.StorageTypeLocal {
+		// 本地备份路径
+		w.hint("本地备份根目录（绝对路径）：目录不存在会自动创建；建议放在与 data_path 不同的磁盘")
+		if a.LocalBackupPath, err = w.askAbsPath("本地备份目录"); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// S3 全套
 	// 5. S3 endpoint（URL 校验）
 	w.hint("S3 兼容存储的服务地址（MinIO / RustFS / 公有云 endpoint）")
 	if a.S3Endpoint, err = w.askURL("S3 endpoint", "http://127.0.0.1:9000"); err != nil {
@@ -329,6 +377,22 @@ func (w *Wizard) askURL(label, def string) (string, error) {
 func validURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// askBackend 询问备份存储后端（legacy setup 入口用）。
+func (w *Wizard) askBackend() (string, error) {
+	for {
+		ans, err := w.askLine("备份存储后端 (s3/local)", config.StorageTypeS3)
+		if err != nil {
+			return "", err
+		}
+		switch backend := strings.TrimSpace(ans); backend {
+		case config.StorageTypeS3, config.StorageTypeLocal:
+			return backend, nil
+		default:
+			fmt.Fprintln(w.opts.Stderr, "后端必须是 s3 / local，请重输")
+		}
+	}
 }
 
 func (w *Wizard) askAuthMode() (string, error) {

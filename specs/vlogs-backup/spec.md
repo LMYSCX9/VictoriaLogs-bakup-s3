@@ -391,3 +391,53 @@
 2. 本地 30 天清理由调度侧调用本工具 `delete` 实现，禁止依赖 VL retention 自动清理本地分区。
 3. 过期备份淘汰交给 S3 桶生命周期规则；`gc` 不提供按保留期删除完整单元的能力（R-GC-04）。
 4. `restore` 对超出 `vl_retention_days`（默认 181）窗口的目标直接拒绝（R-RS-10，退出码 6）。
+
+---
+
+## 9. 备份存储后端（ST）
+
+> 抽象的设计决策 D15：编排层只依赖 `ObjectStore` 接口，具体实现由 runtime 按 `storage_type` 配置选择；两种后端的键空间与 manifest 语义完全同构。
+
+### R-ST-01 双实现：S3 与本地文件系统
+
+**当**配置 `storage_type = local`（或 `local_backup_path` 非空） **时**，backup / restore / list / verify / gc 六类命令应把备份单元读写到本地 `local_backup_path` 目录下；**local 模式忽略 `s3_prefix`**（布局裁决：本地根目录下直接是 `v1/`，不引入 prefix 概念），除根目录与 prefix 段外，键空间与 S3 模式完全同构。
+
+验收：
+- 同一集群同一天分区，分别以 S3 和 local 备份后，两边的 `manifest.json` 字段逐字节一致、`files/` 下每个文件内容逐字节一致；
+- `restore` 从 S3 备份恢复的结果与从 local 备份恢复的结果，对该日查询返回的数据集合完全一致（VL 进程 PID 不变）；
+- 本地模式下，备份单元落在 `local_backup_path/v1/<cluster>/<node>/<YYYYMMDD>/`（忽略 `s3_prefix`），该目录结构可直接用文件系统工具（tar / rsync / 压缩归档）拷贝，作为另一份离线备份，不破坏其自身作为本工具备份源被 `restore` 消费的能力；
+- `setup` 向导在选择 `storage_type=local` 时跳过所有 S3 问题（endpoint / region / bucket / path-style / AK / SK），改为询问本地路径；在选择 `storage_type=s3` 时保持原有流程不变；`--skip-check` 时两种路径均允许直接生成配置。
+
+### R-ST-02 配置优先级与校验
+
+**系统应**按以下优先级解析生效存储类型：`local_backup_path` 非空 → 强制 local；否则 `storage_type` 字段，空值默认 `s3`。
+
+验收：
+- `storage_type=local` 且 `local_backup_path` 非绝对路径时，启动直接失败（退出码 2）；
+- `storage_type=s3` 但缺失 s3_endpoint 或 s3_bucket 时，对应命令（backup/restore/list/verify）在 Require 阶段失败，退出码 2；
+- `storage_type=local` 时，`loadConfigFor` 只检查数据目录（backup/restore/delete）与 cluster/node，不再强制 S3 字段；
+- 所有凭据（S3 AK/SK、VL password、VL token）在两种后端下均不写入 stdout / stderr / 日志 / manifest（C9 不变）。
+
+### R-ST-03 命令行路由拓扑
+
+**系统应**提供 file / s3 子命令、并保留 legacy 自动路由：
+
+```text
+setup     file | s3 | (legacy)     # setup 无后缀 → 先问后端
+backup    file | s3 | (legacy)     # legacy 自动路由 + deprecated
+restore   file | s3 | (legacy)
+list      file | s3 | (legacy)
+verify    file | s3 | (legacy)
+gc        file | s3 | (legacy)
+delete    —                        # 删本地在线分区，与备份后端无关
+version   —                        # 元信息命令
+```
+
+验收：
+- `backup s3` 的 `loadConfigFor` 必须在 `cfg.EffectiveStorageType() != s3` 时直接报错退出码 2，错误信息提示改用 `setup s3` 或调整 `storage_type`；
+- `backup file` 同理，非 local 时退出码 2；
+- `backup`（legacy）按 `cfg.EffectiveStorageType()` 自动路由到 S3 或本地后端的核心流程，**并同时**：stderr 输出一行废弃警告；`--json` 摘要加 `deprecated: true` 字段；
+- `setup s3` 直接走 S3 全套问答，跳过后端选择；`setup file` 同理只问 VL + 本地路径；`setup`（legacy）先问后端再条件裁剪；
+- `delete` 始终不加子命令——它删的是 `partitions/<date>` 本地在线分区，语义与备份存储后端无关；
+- `gc file` 清理本地备份根目录下**无 manifest 的残留前缀**（备份中断留下的半成品目录）；`gc s3` 清理 S3 上的同类残留（行为与原版一致）；两种后端的 gc 都默认 dry-run，`--yes` 才真正执行；
+- Legacy 兼容至少保留两个小版本，之后在 Changelog 里公告移除旧命令。

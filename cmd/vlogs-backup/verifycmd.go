@@ -11,10 +11,22 @@ import (
 	"github.com/vlogs-backup/vlogs-backup/internal/verify"
 )
 
-// runVerify 校验备份单元完整性（R-MF-02/03）：
-// manifest 存在性 + 逐对象 HEAD 比对 size，--deep 时再全量比对 sha256；
-// 任一对象缺失或大小不一致以退出码 5 结束，差异明细写 stderr。
+// runVerify 是顶层入口：根据第一个子参数路由到 file / s3 / legacy 三条路径。
 func runVerify(e *env, args []string) int {
+	if len(args) > 0 && args[0] == "file" {
+		return runVerifyCore(e, config.StorageTypeLocal, args[1:])
+	}
+	if len(args) > 0 && args[0] == "s3" {
+		return runVerifyCore(e, config.StorageTypeS3, args[1:])
+	}
+	fmt.Fprintln(e.stderr, deprecatedMsg("verify"))
+	e.deprecated = true
+	return runVerifyCore(e, "", args)
+}
+
+// runVerifyCore 校验备份单元完整性（R-MF-02/03）：
+// manifest 存在性 + 逐对象比对 size，--deep 时再全量比对 sha256。
+func runVerifyCore(e *env, requireStorageType string, args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(e.stderr)
 	cfgFlag := fs.String("config", "", "配置文件路径（默认 "+defaultConfigPath+"）")
@@ -39,8 +51,7 @@ func runVerify(e *env, args []string) int {
 		single = p
 	}
 
-	cfg, err := loadConfigFor(context.Background(), e,
-		config.FieldS3Endpoint, config.FieldS3Bucket)
+	cfg, err := loadConfigFor(context.Background(), e, requireStorageType)
 	if err != nil {
 		return fail(e, err)
 	}

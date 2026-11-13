@@ -34,6 +34,7 @@ type Summary struct {
 	Units            int64    `json:"units,omitempty"`             // gc：删除备份单元数（§11.3）
 	Objects          int64    `json:"objects,omitempty"`           // gc：删除对象数（§11.3）
 	Leftovers        int64    `json:"leftovers,omitempty"`         // gc：残留对象数（§11.3）
+	Deprecated       bool     `json:"deprecated,omitempty"`        // CLI：legacy 旧命令自动路由的废弃标注（§5 子命令拓扑）
 }
 
 // JSON 把摘要渲染为单行 JSON（含末尾换行），满足 R-OPS-02。

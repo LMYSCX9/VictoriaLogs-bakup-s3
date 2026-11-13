@@ -13,6 +13,7 @@
 | M3 | 恢复可用 | 单天在线恢复 E2E 通过，回滚矩阵全覆盖 |
 | M4 | 运维完备 | `setup`/`verify`/`delete`/`gc` 可用，退出码与 JSON 契约齐备 |
 | M5 | 发布 | 四平台二进制（Linux/Windows × amd64/arm64）+ 发布说明 + 运维手册 |
+| M6 | 双后端与子命令路由（2026-11-13） | 本地文件备份后端与 S3 并列可用；六类命令支持 `file`/`s3` 子命令 + legacy 自动路由；R-ST-01~03 全部落地 |
 
 ---
 
@@ -108,14 +109,34 @@
 
 ---
 
+## M6 双后端与子命令路由（2026-11-13 迭代，已完成）
+
+> 背景：并非所有部署场景都有 S3 对象存储。新增本地文件系统备份后端，并把六类命令升级为 `file` / `s3` 子命令路由；对应 `spec.md` §9（R-ST-01 ~ R-ST-03）与设计决策 D15。**不触碰任何 C 类硬约束**（快照来源、manifest 提交点、detach/attach 流程均在编排层，未改动）。
+
+| # | 任务 | 产出 | 验收 | 状态 |
+| --- | --- | --- | --- | --- |
+| T6.1 | 本地后端实现 | `internal/s3store/local.go`：`ObjectStore` 接口 + `LocalStore`（键→路径映射、Put 临时文件+rename 原子落位、List 按前缀剪枝 + ctx 取消、HeadDir 连通性探测）；`purge` 编译期断言扩展 | R-ST-01：两种后端产物同构；manifest 提交语义（C3）不变 | ✅ |
+| T6.2 | 配置层扩展 | `internal/config`：`storage_type` / `local_backup_path` 键、`VLB_STORAGE_TYPE` / `VLB_LOCAL_BACKUP_PATH` 环境变量、`EffectiveStorageType()`（local_backup_path 非空强制 local）、`RequireBackend()` | R-ST-02：优先级 `local_backup_path` 非空 > `storage_type` > 默认 `s3`；非法值退出码 2 | ✅ |
+| T6.3 | 命令路由改造 | 六类命令（setup/backup/restore/list/verify/gc）顶层 `runXxx` 路由 → `runXxxCore(requireStorageType)`；legacy 自动路由 + stderr 废弃警告 + JSON `deprecated:true`；`delete` 传 `"skip"` 与后端解耦；`loadConfigFor` 后端强制校验 + `backendFixHint` 可操作指引 | R-ST-03：后缀不匹配退出码 2；legacy 行为兼容 | ✅ |
+| T6.4 | setup 向导条件裁剪 | `Options.ForceBackend`；后端选择步骤 + 跨后端共用项 + 后端专属项二选一；`defaultCheckLocal` 本地目录可写探测；`configMap` / `printSummary` 按后端分支 | `setup file` 生成 `storage_type="local"`，`setup s3` 保持原流程；spec R-ST-01 向导条目 | ✅ |
+| T6.5 | 布局裁决与文档同步 | **裁决：local 模式忽略 `s3_prefix`**，本地布局为 `<root>/v1/<cluster>/<node>/`（buildRuntime 对 local 传空前缀）；同步 AGENTS.md §4、设计文档 §4/§5(D15)/§6.1/§8.2/§10.3、spec §9、README、manual | spec R-ST-01 与设计文档 §6.1 口径一致；S3 布局与 `format_version` 未变 | ✅ |
+| T6.6 | 代码审查与修复 | 双验证员交叉审查 7 项问题全部修复：setup file→local 映射、错误指引可操作化、布局三方对齐、usageText 更新、List 前缀剪枝、ctx 取消传播、pathToKey 一致性 | 门禁全绿（gofmt / vet / test 14 包 / build） | ✅ |
+| T6.7 | 本地后端补充测试 | （部分完成 2026-11-13）cmd 接线层回归测试 `runtime_test.go::TestEffectiveKeyPrefix`（E2E 曾因 backup/restore/purge 三处直读 `cfg.S3Prefix` 导致 local 布局多出 prefix 层，已修复为 `effectiveKeyPrefix` 单一事实源）；LocalStore.Delete 增加空父目录清理。**仍待办**：`setup file` 分支端到端向导测试（ask / configMap / printSummary / defaultCheckLocal） | R-ST-01 / R-ST-03 本地分支用例补齐 | 🔶 部分 |
+
+**遗留风险记录**：`setup file` 分支的向导流程只有 S3 分支测试桩覆盖（T6.7 余项）；`gc file` 本地清理路径已于 2026-11-13 在 192.168.1.53 实测通过（伪造 stale 前缀 dry-run 列出 → --yes 删除 → 空目录树一并清理 → 完整单元无损）。
+
+---
+
 ## 并行建议
 
 ```text
 M0 ──► M1 ──┬──► M2 ──► M3 ──► M4 ──► M5
             └──► T1.x 可并行完成后，T2.1/T2.2/T2.3 三条线可并行开发
+M5 ──► M6（双后端迭代，2026-11-13 已完成；T6.7 补测试待办）
 ```
 
 - `manifest`（T2.1）、`vl`（T2.2）、`s3store`（T2.3）三者互相独立，可并行。
 - setup 链路（T4.2 ~ T4.5）只依赖 T1.2/T2.2/T2.3，可与 M3 并行开发。
 - M3 必须等 M2 完成，因为恢复的校验依赖备份产物的真实结构。
 - T5.4 演练不可省略：设计的并发默认值与磁盘系数（Q2）只能靠实测确认。
+- M6 为 M5 之后的增量迭代：双后端（T6.1/T6.2）先行，路由（T6.3）与向导（T6.4）依赖配置层；T6.7 补测试可与任意后续迭代并行。

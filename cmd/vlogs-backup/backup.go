@@ -11,9 +11,23 @@ import (
 	"github.com/vlogs-backup/vlogs-backup/internal/errs"
 )
 
-// runBackup 备份单日或日期区间（R-BK-01/02/04/05/06/07）。
-// 逐天独立执行：单天失败不影响其余天，退出码取最严重者（R-BK-02）。
+// runBackup 是顶层入口：根据第一个子参数路由到 file / s3 / legacy 三条路径。
 func runBackup(e *env, args []string) int {
+	if len(args) > 0 && args[0] == "file" {
+		return runBackupCore(e, config.StorageTypeLocal, args[1:])
+	}
+	if len(args) > 0 && args[0] == "s3" {
+		return runBackupCore(e, config.StorageTypeS3, args[1:])
+	}
+	// legacy：按 config 里的 storage_type 自动路由
+	fmt.Fprintln(e.stderr, deprecatedMsg("backup"))
+	e.deprecated = true
+	return runBackupCore(e, "", args)
+}
+
+// runBackupCore 是备份核心逻辑；requireStorageType="" 表示按 cfg 自动选后端（legacy），
+// "local" / "s3" 表示子命令强制指定。
+func runBackupCore(e *env, requireStorageType string, args []string) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(e.stderr)
 	cfgFlag := fs.String("config", "", "配置文件路径（默认 "+defaultConfigPath+"）")
@@ -43,8 +57,8 @@ func runBackup(e *env, args []string) int {
 		return usageErr(e, "%v", err)
 	}
 
-	cfg, err := loadConfigFor(context.Background(), e,
-		config.FieldValuePath, config.FieldDataPath, config.FieldS3Endpoint, config.FieldS3Bucket)
+	cfg, err := loadConfigFor(context.Background(), e, requireStorageType,
+		config.FieldValuePath, config.FieldDataPath)
 	if err != nil {
 		return fail(e, err)
 	}
@@ -73,7 +87,7 @@ func runBackup(e *env, args []string) int {
 	opts := backup.Options{
 		Cluster:           cfg.Cluster,
 		Node:              cfg.Node,
-		S3Prefix:          cfg.S3Prefix,
+		S3Prefix:          effectiveKeyPrefix(cfg),
 		Concurrency:       cfg.Concurrency,
 		IfExists:          *ifExistsFlag,
 		ToolVersion:       currentVersion().Version,

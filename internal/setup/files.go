@@ -53,12 +53,18 @@ func configMap(a *Answers) map[string]any {
 		"data_path":         a.DataPath,
 		"cluster":           a.Cluster,
 		"node":              a.Node,
-		"s3_endpoint":       a.S3Endpoint,
-		"s3_bucket":         a.S3Bucket,
-		"s3_prefix":         a.S3Prefix,
-		"s3_path_style":     a.S3PathStyle,
+		"storage_type":      a.StorageType,
 		"concurrency":       config.Default().Concurrency,
 	}
+	if a.StorageType == config.StorageTypeLocal {
+		m["local_backup_path"] = a.LocalBackupPath
+		return m
+	}
+	// S3 后端
+	m["s3_endpoint"] = a.S3Endpoint
+	m["s3_bucket"] = a.S3Bucket
+	m["s3_prefix"] = a.S3Prefix
+	m["s3_path_style"] = a.S3PathStyle
 	if a.S3Region != "" {
 		m["s3_region"] = a.S3Region
 	}
@@ -106,6 +112,13 @@ func (w *Wizard) printSummary(a *Answers) {
 	}
 	fmt.Fprintf(out, "  data_path     : %s\n", a.DataPath)
 	fmt.Fprintf(out, "  cluster/node  : %s / %s\n", a.Cluster, a.Node)
+	fmt.Fprintf(out, "  storage_type  : %s\n", a.StorageType)
+	if a.StorageType == config.StorageTypeLocal {
+		fmt.Fprintf(out, "  local_backup_path: %s\n", a.LocalBackupPath)
+		fmt.Fprintf(out, "下一步示例: vlogs-backup --config %s backup file --date 2026-10-27 --dry-run\n", cfgPath)
+		return
+	}
+	// S3 后端
 	fmt.Fprintf(out, "  s3_endpoint   : %s\n", a.S3Endpoint)
 	if a.S3Region != "" {
 		fmt.Fprintf(out, "  s3_region     : %s\n", a.S3Region)
@@ -119,5 +132,5 @@ func (w *Wizard) printSummary(a *Answers) {
 	if a.S3SecretKey != "" {
 		fmt.Fprintf(out, "  s3_secret_key : ***\n")
 	}
-	fmt.Fprintf(out, "下一步示例: vlogs-backup --config %s backup --date 2026-10-27 --dry-run\n", cfgPath)
+	fmt.Fprintf(out, "下一步示例: vlogs-backup --config %s backup s3 --date 2026-10-27 --dry-run\n", cfgPath)
 }

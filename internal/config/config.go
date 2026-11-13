@@ -24,6 +24,13 @@ const (
 	AuthModeBearer = "bearer"
 )
 
+// 备份存储后端类型（storage_type）：编排层依赖 ObjectStore 接口，
+// 具体实现由 runtime 按此字段构造。
+const (
+	StorageTypeS3    = "s3"
+	StorageTypeLocal = "local"
+)
+
 // Config 是工具的全量配置。
 type Config struct {
 	// VictoriaLogs
@@ -42,7 +49,12 @@ type Config struct {
 	Cluster  string
 	Node     string
 
-	// S3
+	// 备份存储：StorageType 决定用哪一套下面的配置；
+	// 若 local_backup_path 非空则自动视为 local，忽略 storage_type。
+	StorageType     string
+	LocalBackupPath string
+
+	// S3（storage_type=s3 时生效）
 	S3Endpoint  string
 	S3Region    string
 	S3Bucket    string
@@ -75,6 +87,8 @@ type tomlFile struct {
 	DataPath             string  `toml:"data_path"`
 	Cluster              string  `toml:"cluster"`
 	Node                 string  `toml:"node"`
+	StorageType          string  `toml:"storage_type"`
+	LocalBackupPath      string  `toml:"local_backup_path"`
 	S3Endpoint           string  `toml:"s3_endpoint"`
 	S3Region             string  `toml:"s3_region"`
 	S3Bucket             string  `toml:"s3_bucket"`
@@ -103,6 +117,7 @@ func Default() *Config {
 	return &Config{
 		Cluster:         "default",
 		Node:            "default",
+		StorageType:     StorageTypeS3,
 		S3Prefix:        "vlogs",
 		S3PathStyle:     true,
 		Concurrency:     8,
@@ -165,6 +180,12 @@ func loadFile(ctx context.Context, cfg *Config, path string) error {
 	}
 	if f.Node != "" {
 		cfg.Node = f.Node
+	}
+	if f.StorageType != "" {
+		cfg.StorageType = f.StorageType
+	}
+	if f.LocalBackupPath != "" {
+		cfg.LocalBackupPath = f.LocalBackupPath
 	}
 	if f.S3Endpoint != "" {
 		cfg.S3Endpoint = f.S3Endpoint
@@ -266,6 +287,8 @@ var envEntries = []envEntry{
 	{"VLB_DATA_PATH", func(c *Config, v string) error { c.DataPath = v; return nil }},
 	{"VLB_CLUSTER", func(c *Config, v string) error { c.Cluster = v; return nil }},
 	{"VLB_NODE", func(c *Config, v string) error { c.Node = v; return nil }},
+	{"VLB_STORAGE_TYPE", func(c *Config, v string) error { c.StorageType = v; return nil }},
+	{"VLB_LOCAL_BACKUP_PATH", func(c *Config, v string) error { c.LocalBackupPath = v; return nil }},
 	{"VLB_S3_ENDPOINT", func(c *Config, v string) error { c.S3Endpoint = v; return nil }},
 	{"VLB_S3_REGION", func(c *Config, v string) error { c.S3Region = v; return nil }},
 	{"VLB_S3_BUCKET", func(c *Config, v string) error { c.S3Bucket = v; return nil }},
@@ -377,6 +400,11 @@ func (c *Config) Validate() error {
 	if c.VLRetentionDays < 1 {
 		return errs.Usage("vl_retention_days must be >= 1, got %d", c.VLRetentionDays)
 	}
+	switch c.StorageType {
+	case "", StorageTypeS3, StorageTypeLocal:
+	default:
+		return errs.Usage("storage_type must be one of s3/local, got %q", c.StorageType)
+	}
 	if c.S3MultipartThreshold < 0 {
 		return errs.Usage("s3_multipart_threshold must not be negative, got %d", c.S3MultipartThreshold)
 	}
@@ -413,19 +441,21 @@ func schemeOf(raw string) string {
 
 // 必填字段名，供 Require 使用。
 const (
-	FieldValuePath  = "vl_url"
-	FieldDataPath   = "data_path"
-	FieldS3Endpoint = "s3_endpoint"
-	FieldS3Bucket   = "s3_bucket"
+	FieldValuePath   = "vl_url"
+	FieldDataPath    = "data_path"
+	FieldS3Endpoint  = "s3_endpoint"
+	FieldS3Bucket    = "s3_bucket"
+	FieldLocalBackup = "local_backup_path"
 )
 
 // Require 检查指定字段非空，缺失时返回退出码 2 的错误。
 func (c *Config) Require(fields ...string) error {
 	getters := map[string]func() string{
-		FieldValuePath:  func() string { return c.VLURL },
-		FieldDataPath:   func() string { return c.DataPath },
-		FieldS3Endpoint: func() string { return c.S3Endpoint },
-		FieldS3Bucket:   func() string { return c.S3Bucket },
+		FieldValuePath:   func() string { return c.VLURL },
+		FieldDataPath:    func() string { return c.DataPath },
+		FieldS3Endpoint:  func() string { return c.S3Endpoint },
+		FieldS3Bucket:    func() string { return c.S3Bucket },
+		FieldLocalBackup: func() string { return c.LocalBackupPath },
 	}
 	for _, f := range fields {
 		get, ok := getters[f]
@@ -437,4 +467,29 @@ func (c *Config) Require(fields ...string) error {
 		}
 	}
 	return nil
+}
+
+// RequireBackend 根据生效的存储后端追加必填项：
+// file → 要求 local_backup_path；s3 → 要求 s3_endpoint + s3_bucket。
+// 这是"存储感知"的必填校验入口，供 cmd 层的 legacy / 文件子命令共用。
+func (c *Config) RequireBackend() error {
+	switch c.EffectiveStorageType() {
+	case StorageTypeLocal:
+		return c.Require(FieldLocalBackup)
+	default:
+		return c.Require(FieldS3Endpoint, FieldS3Bucket)
+	}
+}
+
+// EffectiveStorageType 返回生效的存储后端：
+// local_backup_path 非空 → 强制 local；否则 StorageType 空值回退为 s3。
+// cmd 层所有命令（包括 legacy）统一走这里判定，不再各自重复 resolve 逻辑。
+func (c *Config) EffectiveStorageType() string {
+	if c.LocalBackupPath != "" {
+		return StorageTypeLocal
+	}
+	if c.StorageType == "" {
+		return StorageTypeS3
+	}
+	return c.StorageType
 }

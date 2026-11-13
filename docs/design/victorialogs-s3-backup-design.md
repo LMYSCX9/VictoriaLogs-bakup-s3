@@ -80,6 +80,7 @@ flowchart LR
     end
     VL -->|HTTP: snapshot/detach/attach| VLS[(VictoriaLogs)]
     ST -->|HTTPS: Put/Get/List| S3[(S3 / RustFS)]
+    ST -->|本地文件 IO| LOCAL[(local_backup_path)]
     BK -->|硬链接读取| FS[("<storageDataPath>/partitions")]
     RS -->|rename 原子替换| FS
 ```
@@ -91,7 +92,7 @@ flowchart LR
 | 入口层 | `cmd/vlogs-backup` | 参数解析、确认交互、退出码映射、输出格式 | 不写业务逻辑 |
 | 编排层 | `internal/backup`、`internal/restore` | 作业状态机、步骤编排、回滚 | 不直接拼 HTTP 请求 |
 | 契约层 | `internal/manifest` | 备份单元描述、完整性声明、版本兼容 | 不做 IO |
-| 访问层 | `internal/vl`、`internal/s3store` | 端点调用、键布局、重试、分片上传 | 不感知业务语义 |
+| 访问层 | `internal/vl`、`internal/s3store` | VL 端点调用、S3/Local 双实现对象存储、键布局、重试、分片上传 | 不感知业务语义；编排层只依赖 `ObjectStore` 接口 |
 | 配置层 | `internal/config` | 多来源配置合并、凭据解析、校验 | 不落盘明文凭据 |
 
 ## 5. 关键设计决策
@@ -112,13 +113,17 @@ flowchart LR
 | D12 | 鉴权经 vmauth，支持 `none`/`basic`/`bearer` 三种模式，配置驱动 | 写死某一种鉴权 header | 生产部署在 VL 前置 vmauth；两种标准模式（Basic Auth / Bearer Token）覆盖现有部署，模式与凭据全部来自配置与 credentials（Q1 已决） |
 | D13 | 冷热分层是**使用者的调度业务方案**，不是内置流水线：工具只提供独立原子能力（`backup` / `restore` / `delete` / `gc`），30 天本地保留窗口与冷层落位序列由调用方/调度侧编排 | 把分层生命周期做成内置自动流水线 | 调度节奏、窗口长短因业务而异，内置流水线会绑死运维弹性；工具只需保证每个原子命令自身安全（如 `delete` 的备份护栏）（Q4 已决，见 §7.7） |
 | D14 | 跨平台目标：Linux/Windows × amd64/arm64 四平台交叉编译 | 仅 Linux | 需求方部署环境包含 Windows；构建保持 `CGO_ENABLED=0` 纯 Go（Q6 已决） |
+| D15 | 备份存储后端可切换：`ObjectStore` 接口抽象出 S3 与本地文件系统两个实现，编排层零感知 | 硬编码只支持 S3 | 并非所有运维场景都有对象存储；本地路径方便单机开发、测试与无存储环境下落地；`KeyBuilder` 统一键布局，S3 键 `/` 分隔天然映射到本地目录层级，manifest 与提交点语义完全不变，restore/verify/gc/delete 自动适配 |
 
 ## 6. 数据模型
 
-### 6.1 S3 仓库布局（format v1）
+### 6.1 备份单元布局（format v1，后端无关）
+
+备份单元的**键空间统一**——`KeyBuilder` 生成 "/" 分隔的逻辑键，`Store`（S3 实现）直接用作 S3 对象键，`LocalStore`（本地实现）映射为 `filepath.Join(baseDir, filepath.FromSlash(key))`；两种后端的备份单元结构完全同构，manifest 提交语义（C3）一致。**local 模式忽略 `s3_prefix`**（布局裁决：本地根目录下直接是 `v1/`，不引入 prefix 概念；S3 模式保持 `<prefix>/v1/` 不变）。
 
 ```text
-s3://<bucket>/<prefix>/v1/
+S3 模式：s3://<bucket>/<prefix>/v1/
+本地模式：<local_backup_path>/v1/
 └── <cluster>/<node>/<YYYYMMDD>/
     ├── manifest.json           # 提交点，最后写入
     └── files/                  # 快照根相对路径原样保留
@@ -435,7 +440,7 @@ type ObjectStore interface {
 | `internal/config` | `Config`、`Load()` | flag > `VLB_*` 环境变量 > 配置文件；启动即校验并给出明确错误 |
 | `internal/setup` | `Wizard`、`Prompter` | 交互式初始化向导：逐项询问、连通性验证、渲染并写入 `config.toml` 与 `credentials`；输入经由 `Prompter` 接口注入，便于测试 |
 | `internal/vl` | `Client` | 端点封装、鉴权头注入、5xx 退避重试、响应解析 |
-| `internal/s3store` | `Store` | `KeyBuilder` 统一生成键；分段上传阈值与分片大小可配 |
+| `internal/s3store` | `ObjectStore`、`Store`、`LocalStore`、`KeyBuilder` | `Store` = aws-sdk-go-v2 实现（分段上传阈值与分片大小可配）；`LocalStore` = 本地文件系统实现（`filepath` 键映射 + 原子临时文件 + rename）；`KeyBuilder` 统一生成 "/" 分隔的逻辑键（§6.1） |
 | `internal/manifest` | `Manifest`、`Verify()` | 结构定义、版本兼容、完整性比对 |
 | `internal/errs` | `Error`、`ExitCode()` | 退出码契约常量（§11.2）与错误分类构造器；`ExitCode(err)` 从错误链提取退出码；纯函数，禁止 import 任何 IO 包 |
 | `internal/backup` | `Job` | 状态机与步骤编排，负责快照清理与摘要生成 |
@@ -519,7 +524,9 @@ type ObjectStore interface {
 | 数据目录（`data_path`） | `VLB_DATA_PATH` | — | backup/restore/delete 必填 |
 | 集群名（`cluster`） | `VLB_CLUSTER` | `default` | 否 |
 | 节点名（`node`） | `VLB_NODE` | `default` | 集群部署必填 |
-| S3 端点（`s3_endpoint`） | `VLB_S3_ENDPOINT` | — | 是（除 dry-run 外） |
+| 备份存储后端（`storage_type`） | `VLB_STORAGE_TYPE` | `s3` | 否；`s3` / `local`；`local_backup_path` 非空时自动视为 `local`（优先级更高） |
+| 本地备份根目录（`local_backup_path`） | `VLB_LOCAL_BACKUP_PATH` | — | 仅 `storage_type=local` 时必填；绝对路径，需可写；目录不存在自动创建 |
+| S3 端点（`s3_endpoint`） | `VLB_S3_ENDPOINT` | — | `storage_type=s3` 时必填 |
 | 桶（`s3_bucket`） | `VLB_S3_BUCKET` | — | 是 |
 | 前缀（`s3_prefix`） | `VLB_S3_PREFIX` | `vlogs` | 否 |
 | 区域（`s3_region`） | `VLB_S3_REGION` | `us-east-1` 占位 | 视厂商 |
@@ -550,41 +557,51 @@ type ObjectStore interface {
 
 ### 10.3 setup 子命令生成的配置
 
-`setup` 是唯一的配置文件生成入口，面向首次安装的人工初始化：
+`setup` 是唯一的配置文件生成入口，面向首次安装的人工初始化。入口有三种：
+
+| 命令 | 行为 |
+| --- | --- |
+| `setup s3` | 强制后端 = s3，跳过后端选择，直接问 S3 全套；生成 `storage_type = "s3"` |
+| `setup file` | 强制后端 = local，跳过后端选择，只问本地路径；生成 `storage_type = "local"` |
+| `setup`（legacy） | 先问后端（`s3` / `local`），再按类型条件裁剪后续步骤 |
 
 ```text
 /etc/vlogs-backup/
-├── config.toml      # 0644：vl_url、vl_auth_mode（none/basic/bearer）、data_path、cluster、node、
-│                    #        vl_retention_days、s3_endpoint、s3_region、s3_bucket、s3_prefix、s3_path_style、
-│                    #        concurrency（不含任何密钥值）
-└── credentials      # 0600：s3_access_key、s3_secret_key、vl_username?、vl_password?、vl_token?
-                     #        （按鉴权模式写入对应项；可留空则不写该行）
+├── config.toml      # 0644：vl_url、vl_auth_mode、data_path、cluster、node、
+│                    #        storage_type、local_backup_path?（仅 local）、
+│                    #        s3_endpoint/s3_region/s3_bucket/s3_prefix/s3_path_style?（仅 s3）、
+│                    #        vl_retention_days、concurrency
+└── credentials      # 0600：鉴权凭据（vl_username? / vl_password? / vl_token? / s3_access_key? / s3_secret_key?）
 ```
 
-交互流程（固定顺序，逐项给默认值）：
+交互流程（**ForceBackend 条件裁剪后的固定顺序**；每项带默认值，输错可退格修正，Ctrl-C 随时中止）：
 
-| 步骤 | 询问 | 校验 |
-| --- | --- | --- |
-| 1 | VL 地址（`http(s)://host:port`） | URL 合法 |
-| 2 | VL 鉴权模式（`none` / `basic` / `bearer`）；`basic` 输入 username + password（不回显），`bearer` 输入 token（不回显） | 模式合法；对应凭据非空 |
-| 3 | 数据目录（VL `--storageDataPath`） | 绝对路径 |
-| 4 | cluster / node | 非空，默认 `default` |
-| 5 | S3 endpoint | URL 合法 |
-| 6 | S3 region | 允许空（RustFS / MinIO 等可留空） |
-| 7 | S3 bucket / prefix | bucket 非空；prefix 默认 `vlogs` |
-| 8 | S3 path-style | 默认 `true`（RustFS / MinIO / 自建） |
-| 9 | S3 Access Key / Secret Key（不回显） | 必填；写入 credentials（0600）；留空则 backup/restore 等命令失败（退出码 2） |
-| 10 | 连通性验证 | 见下 |
+- **后端选择**：legacy 模式先问 `s3` / `local`；`setup s3` / `setup file` 跳过
+- **跨后端共用**（1~4 步）：
+  | 步骤 | 询问 | 校验 |
+  | --- | --- | --- |
+  | 1 | VL 地址 | URL 合法 |
+  | 2 | VL 鉴权模式；`basic` 问 username + password，`bearer` 问 token（均不回显） | 模式合法；对应凭据非空 |
+  | 3 | 数据目录（VL `--storageDataPath`） | 绝对路径 |
+  | 4 | cluster / node | 非空，默认 `default` |
+
+- **后端专属**（二选一）：
+  | 后端 | 步骤 | 询问 | 校验 |
+  | --- | --- | --- | --- |
+  | s3 | 5~9 | S3 endpoint / region / bucket / prefix / path-style / AK / SK（不回显） | URL 合法；bucket 非空；AK/SK 写入 credentials（0600） |
+  | local | 5 | 本地备份根目录（绝对路径） | 绝对路径；目录可创建且可写 |
+
+- 连通性验证：VL 快照 list 端点可达 + 后端 HeadBucket（S3）或目录可写（local）
 
 规则：
 
 - 目标目录不存在则创建（`0700`）；`config.toml` 已存在时要求输入 `overwrite` 确认，其他输入取消（退出码 7）；
 - `--output-dir` 可改变目标目录（默认 `/etc/vlogs-backup`），仅用于测试或非 root 场景；
-- `--skip-check` 跳过第 10 步；
-- 连通性验证内容：VL 走能力探测（快照 list 端点可达），S3 走 `HeadBucket`；任一失败显示原因并允许「重试 / 重新输入 / 中止」；中止退出码 3，写入文件前验证不通过不落盘；
+- `--skip-check` 跳过连通性验证；
+- 连通性验证失败显示原因并允许「重试 / 重新输入 / 中止」；中止退出码 3，写入文件前验证不通过不落盘；
 - 交互输入走 `term.ReadPassword`，凭据不回显；生成的文件与最终摘要中凭据以 `***` 代替；
 - 非 TTY 环境直接拒绝（退出码 2），提示改用 flag / 环境变量直接运行；
-- 完成后打印下一步示例：`vlogs-backup --config /etc/vlogs-backup/config.toml backup --date 2026-10-27 --dry-run`。
+- 完成后打印下一步示例：`vlogs-backup --config /etc/vlogs-backup/config.toml backup s3 --date 2026-10-27 --dry-run`（按后端类型自动选 `backup s3` / `backup file`）。
 
 ## 11. 可观测性与输出契约
 

@@ -11,9 +11,22 @@ import (
 	"github.com/vlogs-backup/vlogs-backup/internal/verify"
 )
 
-// runList 列出本节点已提交的备份单元（R-MF-01）：
-// 只读扫描 S3，不触碰 VL 与本地分区；无 manifest 的前缀不展示（C3）。
+// runList 是顶层入口：根据第一个子参数路由到 file / s3 / legacy 三条路径。
 func runList(e *env, args []string) int {
+	if len(args) > 0 && args[0] == "file" {
+		return runListCore(e, config.StorageTypeLocal, args[1:])
+	}
+	if len(args) > 0 && args[0] == "s3" {
+		return runListCore(e, config.StorageTypeS3, args[1:])
+	}
+	fmt.Fprintln(e.stderr, deprecatedMsg("list"))
+	e.deprecated = true
+	return runListCore(e, "", args)
+}
+
+// runListCore 列出本节点已提交的备份单元（R-MF-01）：
+// 只读扫描 S3 或本地目录，不触碰 VL 与本地分区；无 manifest 的前缀不展示（C3）。
+func runListCore(e *env, requireStorageType string, args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(e.stderr)
 	cfgFlag := fs.String("config", "", "配置文件路径（默认 "+defaultConfigPath+"）")
@@ -46,8 +59,7 @@ func runList(e *env, args []string) int {
 		}
 	}
 
-	cfg, err := loadConfigFor(context.Background(), e,
-		config.FieldS3Endpoint, config.FieldS3Bucket)
+	cfg, err := loadConfigFor(context.Background(), e, requireStorageType)
 	if err != nil {
 		return fail(e, err)
 	}

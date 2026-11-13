@@ -44,8 +44,8 @@ func runDelete(e *env, args []string) int {
 		return usageErr(e, "%v", err)
 	}
 
-	cfg, err := loadConfigFor(context.Background(), e,
-		config.FieldValuePath, config.FieldDataPath, config.FieldS3Endpoint, config.FieldS3Bucket)
+	cfg, err := loadConfigFor(context.Background(), e, "skip",
+		config.FieldValuePath, config.FieldDataPath)
 	if err != nil {
 		return fail(e, err)
 	}
@@ -65,7 +65,7 @@ func runDelete(e *env, args []string) int {
 	job, err := purge.NewJob(rt.vl, rt.store, rt.locks, purge.Options{
 		Cluster:       cfg.Cluster,
 		Node:          cfg.Node,
-		S3Prefix:      cfg.S3Prefix,
+		S3Prefix:      effectiveKeyPrefix(cfg),
 		DataPath:      cfg.DataPath,
 		ForceNoBackup: *forceNoBackupFlag,
 		ForceToday:    *forceTodayFlag,

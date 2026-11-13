@@ -25,17 +25,17 @@ var (
 
 const usageText = `vlogs-backup — VictoriaLogs 不停机备份 / 恢复工具
 
-用法: vlogs-backup [--config <path>] <command> [flags]
+用法: vlogs-backup [--config <path>] <command> [file|s3] [flags]
 
-命令:
-  setup      交互式生成配置文件（默认写入 /etc/vlogs-backup/）
-  backup     备份一个或多个日期分区
-  restore    在线恢复指定日期分区
-  list       列出已提交备份
-  verify     校验备份完整性
-  delete     删除本地指定日期的分区数据（不可恢复，需确认）
-  gc         清理 S3 上无 manifest 的未完成备份前缀
-  version    输出版本与构建信息
+命令（支持 file / s3 后端子命令的，不带后缀时按配置自动路由）:
+  setup file|s3    交互式生成配置文件（file=本地后端，s3=对象存储；不带后缀则先询问）
+  backup file|s3   备份一个或多个日期分区
+  restore file|s3  在线恢复指定日期分区
+  list file|s3     列出已提交备份
+  verify file|s3   校验备份完整性
+  delete           删除本地指定日期的分区数据（不可恢复，需确认；与备份后端无关）
+  gc file|s3       清理无 manifest 的未完成备份前缀
+  version          输出版本与构建信息
 
 --config 可放在子命令之前（全局形式）或子命令之后；两者同用时子命令形式优先。
 运行 "vlogs-backup <command> -h" 查看子命令参数。`

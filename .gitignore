@@ -1,0 +1,7 @@
+# 构建产物
+bin/
+dist/
+
+# 本地测试临时文件
+*.err
+.vlogs-backup/

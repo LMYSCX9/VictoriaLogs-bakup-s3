@@ -38,6 +38,7 @@ type env struct {
 	cfgPath     string // 生效的配置文件路径；空表示跳过文件层
 	cfgExplicit bool   // 用户显式指定了 --config
 	jsonOut     bool   // --json：stdout 只输出单行摘要
+	deprecated  bool   // legacy 旧命令自动路由（摘要加 deprecated=true，stderr 打 warning）
 
 	in *bufio.Reader // 懒初始化的 stdin 缓冲
 }
@@ -113,8 +114,15 @@ func applyConfigFlag(fs *flag.FlagSet, e *env, path string) {
 }
 
 // loadConfigFor 装配配置并检查本命令的必填字段。
-// 未显式指定 --config 且默认路径不存在时跳过文件层（仅默认值 + 环境变量）。
-func loadConfigFor(ctx context.Context, e *env, fields ...string) (*config.Config, error) {
+// requireStorageType 控制存储后端的强制校验：
+//
+//	""       → legacy 模式：按 cfg.EffectiveStorageType() 自动选必填项（local 要 local_backup_path，s3 要 s3_endpoint + s3_bucket）
+//	"local"  → file 子命令：cfg 的生效后端必须是 local，且 local_backup_path 必填
+//	"s3"     → s3 子命令：cfg 的生效后端必须是 s3，且 s3_endpoint + s3_bucket 必填
+//
+// 不接受 storage 的命令（delete / version）传 requireStorageType="skip"。
+// 同时接受 VLURL / DataPath 等跨后端共用的必填字段。
+func loadConfigFor(ctx context.Context, e *env, requireStorageType string, extraFields ...string) (*config.Config, error) {
 	path := e.cfgPath
 	if e.cfgExplicit {
 		if path == "" {
@@ -134,10 +142,48 @@ func loadConfigFor(ctx context.Context, e *env, fields ...string) (*config.Confi
 	if err != nil {
 		return nil, err
 	}
-	if err := cfg.Require(fields...); err != nil {
-		return nil, err
+	// 跨后端共用的必填项。
+	if len(extraFields) > 0 {
+		if err := cfg.Require(extraFields...); err != nil {
+			return nil, err
+		}
+	}
+	// 存储后端校验。
+	switch requireStorageType {
+	case "skip":
+		// delete / version：不校验存储字段
+	case config.StorageTypeLocal, config.StorageTypeS3:
+		// 子命令：强制 cfg 的生效后端必须匹配
+		if cfg.EffectiveStorageType() != requireStorageType {
+			return nil, errs.Usage("effective storage backend is %s, command requires %s — %s",
+				cfg.EffectiveStorageType(), requireStorageType, backendFixHint(requireStorageType, cfg))
+		}
+		if err := cfg.RequireBackend(); err != nil {
+			return nil, err
+		}
+	case "":
+		// legacy：按 cfg 自动选后端 + 必填项
+		if err := cfg.RequireBackend(); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, errs.Usage("unknown requireStorageType %q", requireStorageType)
 	}
 	return cfg, nil
+}
+
+// backendFixHint 为后端不匹配错误生成可操作的修复指引：
+// 提示的字段名与子命令名必须真实存在，且在当前配置下可生效。
+func backendFixHint(want string, cfg *config.Config) string {
+	if want == config.StorageTypeLocal {
+		return "set storage_type=local and local_backup_path in config / env, or run setup file"
+	}
+	// want == s3：local_backup_path 非空时优先级高于 storage_type，
+	// 只改 storage_type 无法生效，必须明确指出要先清空 local_backup_path。
+	if cfg.LocalBackupPath != "" {
+		return "local_backup_path takes precedence over storage_type; clear it or use the file subcommand"
+	}
+	return "set storage_type=s3 (with s3_endpoint/s3_bucket) in config / env, or run setup s3"
 }
 
 // runtimeNeeds 声明子命令需要的运行时组件。
@@ -153,7 +199,7 @@ type kit struct {
 	cfg    *config.Config
 	logger *slog.Logger
 	vl     *vl.Client
-	store  *s3store.Store
+	store  s3store.ObjectStore
 	locks  *lock.Manager
 	keys   *s3store.KeyBuilder
 }
@@ -192,30 +238,55 @@ func buildRuntime(ctx context.Context, e *env, cfg *config.Config, op string, ne
 	}
 
 	if needs.s3 {
-		s, err := s3store.NewStore(s3store.Options{
-			Endpoint:           cfg.S3Endpoint,
-			Region:             cfg.S3Region,
-			Bucket:             cfg.S3Bucket,
-			AccessKey:          cfg.S3AccessKey,
-			SecretKey:          cfg.S3SecretKey,
-			PathStyle:          cfg.S3PathStyle,
-			MultipartThreshold: cfg.S3MultipartThreshold,
-			MultipartPartSize:  cfg.S3MultipartPartSize,
-			Timeout:            cfg.IOTimeout,
-			Logger:             logger,
-		})
-		if err != nil {
-			return nil, err
+		st := cfg.EffectiveStorageType()
+		switch st {
+		case config.StorageTypeLocal:
+			ls, err := s3store.NewLocalStore(s3store.LocalOptions{
+				BaseDir: cfg.LocalBackupPath,
+			})
+			if err != nil {
+				return nil, err
+			}
+			rt.store = ls
+		default:
+			s, err := s3store.NewStore(s3store.Options{
+				Endpoint:           cfg.S3Endpoint,
+				Region:             cfg.S3Region,
+				Bucket:             cfg.S3Bucket,
+				AccessKey:          cfg.S3AccessKey,
+				SecretKey:          cfg.S3SecretKey,
+				PathStyle:          cfg.S3PathStyle,
+				MultipartThreshold: cfg.S3MultipartThreshold,
+				MultipartPartSize:  cfg.S3MultipartPartSize,
+				Timeout:            cfg.IOTimeout,
+				Logger:             logger,
+			})
+			if err != nil {
+				return nil, err
+			}
+			rt.store = s
 		}
-		rt.store = s
 	}
 
-	keys, err := s3store.NewKeyBuilder(cfg.S3Prefix, cfg.Cluster, cfg.Node)
+	// local 模式忽略 s3_prefix（布局裁决：本地根目录下直接是 v1/<cluster>/<node>/，
+	// 不引入 prefix 概念；S3 模式保持 <prefix>/v1/... 不变）。
+	keys, err := s3store.NewKeyBuilder(effectiveKeyPrefix(cfg), cfg.Cluster, cfg.Node)
 	if err != nil {
 		return nil, err
 	}
 	rt.keys = keys
 	return rt, nil
+}
+
+// effectiveKeyPrefix 返回 KeyBuilder 应使用的键前缀（单一事实源）：
+// local 模式恒为空串；S3 模式透传 cfg.S3Prefix。
+// backup/restore/purge 的 Job 会在包内自建 KeyBuilder，
+// cmd 层构造其 Options 时必须同样经过本函数，禁止直接读 cfg.S3Prefix。
+func effectiveKeyPrefix(cfg *config.Config) string {
+	if cfg.EffectiveStorageType() == config.StorageTypeLocal {
+		return ""
+	}
+	return cfg.S3Prefix
 }
 
 // newLogger 构造写向 stderr 的结构化日志器：时间键 ts（RFC3339）、错误键 err，
@@ -359,6 +430,7 @@ func baseSummary(cfg *config.Config, op string) report.Summary {
 // --json 时 stdout 只有一行 JSON；否则渲染 key: value 表。返回退出码。
 func finishSummary(e *env, s report.Summary, runErr error) int {
 	s.ErrorCode = errs.ExitCode(runErr)
+	s.Deprecated = e.deprecated
 	switch {
 	case runErr != nil:
 		if s.ErrorCode == errs.ExitCanceled {
@@ -434,4 +506,10 @@ func humanBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// deprecatedMsg 返回 legacy 命令的警告文案（stderr 上单次提示），
+// 供各子命令在进入主流程前输出；--json 摘要字段 `deprecated: true` 由 finishSummary 填充。
+func deprecatedMsg(cmd string) string {
+	return fmt.Sprintf("vlogs-backup: %s 已废弃，改用 %s file 或 %s s3（当前按 config 里的 storage_type 自动路由；下版本将移除旧命令）", cmd, cmd, cmd)
 }

@@ -50,7 +50,7 @@ internal/verify       → 备份单元在线清单与完整性校验（list/veri
 internal/manifest     → 纯结构体与校验；禁止 import 任何 IO 包
 internal/errs         → 退出码契约与错误分类；纯函数，禁止 import 其他 internal 包
 internal/vl           → VL HTTP 客户端；只认端点，不认业务语义
-internal/s3store      → S3 客户端与键布局；只认键，不认业务语义
+internal/s3store      → ObjectStore 接口 + 两个实现：`Store`（S3 兼容对象存储）、`LocalStore`（本地文件系统）；统一 `KeyBuilder` 生成键（C7）；只认键与对象操作，不认业务语义
 internal/config       → 配置合并与校验
 internal/setup        → 交互式初始化向导：生成 config.toml + credentials；凭据经 Prompter 注入，不落日志
 internal/lock         → 本地文件锁

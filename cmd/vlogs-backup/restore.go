@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"strings"
 	"time"
 
@@ -12,10 +13,23 @@ import (
 	"github.com/vlogs-backup/vlogs-backup/internal/restore"
 )
 
-// runRestore 在线恢复单个分区（R-RS-01~10）。
-// 确认矩阵在配置加载之前完成（C10 / R-RS-08）：非交互必须 --yes，
-// UTC 今天分区必须 --force-today，交互终端需逐项确认。
+// runRestore 是顶层入口：根据第一个子参数路由到 file / s3 / legacy 三条路径。
 func runRestore(e *env, args []string) int {
+	if len(args) > 0 && args[0] == "file" {
+		return runRestoreCore(e, config.StorageTypeLocal, args[1:])
+	}
+	if len(args) > 0 && args[0] == "s3" {
+		return runRestoreCore(e, config.StorageTypeS3, args[1:])
+	}
+	fmt.Fprintln(e.stderr, deprecatedMsg("restore"))
+	e.deprecated = true
+	return runRestoreCore(e, "", args)
+}
+
+// runRestoreCore 在线恢复单个分区（R-RS-01~10）。
+// requireStorageType="" 表示 legacy 模式，按 config.EffectiveStorageType() 自动选后端；
+// "local" / "s3" 表示子命令强制指定。
+func runRestoreCore(e *env, requireStorageType string, args []string) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(e.stderr)
 	cfgFlag := fs.String("config", "", "配置文件路径（默认 "+defaultConfigPath+"）")
@@ -59,8 +73,8 @@ func runRestore(e *env, args []string) int {
 		}
 	}
 
-	cfg, err := loadConfigFor(context.Background(), e,
-		config.FieldValuePath, config.FieldDataPath, config.FieldS3Endpoint, config.FieldS3Bucket)
+	cfg, err := loadConfigFor(context.Background(), e, requireStorageType,
+		config.FieldValuePath, config.FieldDataPath)
 	if err != nil {
 		return fail(e, err)
 	}
@@ -93,7 +107,7 @@ func runRestore(e *env, args []string) int {
 	job, err := restore.NewJob(rt.vl, rt.store, rt.locks, restore.Options{
 		Cluster:           cfg.Cluster,
 		Node:              cfg.Node,
-		S3Prefix:          cfg.S3Prefix,
+		S3Prefix:          effectiveKeyPrefix(cfg),
 		DataPath:          cfg.DataPath,
 		RetentionDays:     cfg.VLRetentionDays,
 		Concurrency:       cfg.Concurrency,

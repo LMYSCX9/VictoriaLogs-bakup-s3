@@ -11,9 +11,22 @@ import (
 	"github.com/vlogs-backup/vlogs-backup/internal/prune"
 )
 
-// runGC 清理 S3 上无 manifest 的未完成前缀（R-GC-01~03）。
-// 默认 dry-run；--yes 才真正删除。完整备份单元不在此清理范围（R-GC-04）。
+// runGC 是顶层入口：根据第一个子参数路由到 file / s3 / legacy 三条路径。
 func runGC(e *env, args []string) int {
+	if len(args) > 0 && args[0] == "file" {
+		return runGCCore(e, config.StorageTypeLocal, args[1:])
+	}
+	if len(args) > 0 && args[0] == "s3" {
+		return runGCCore(e, config.StorageTypeS3, args[1:])
+	}
+	fmt.Fprintln(e.stderr, deprecatedMsg("gc"))
+	e.deprecated = true
+	return runGCCore(e, "", args)
+}
+
+// runGCCore 清理备份存储上无 manifest 的未完成前缀（R-GC-01~03）。
+// 默认 dry-run；--yes 才真正删除。
+func runGCCore(e *env, requireStorageType string, args []string) int {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	fs.SetOutput(e.stderr)
 	cfgFlag := fs.String("config", "", "配置文件路径（默认 "+defaultConfigPath+"）")
@@ -34,8 +47,7 @@ func runGC(e *env, args []string) int {
 		return usageErr(e, "gc: --stale-after must be positive, got %s", *staleAfterFlag)
 	}
 
-	cfg, err := loadConfigFor(context.Background(), e,
-		config.FieldS3Endpoint, config.FieldS3Bucket)
+	cfg, err := loadConfigFor(context.Background(), e, requireStorageType)
 	if err != nil {
 		return fail(e, err)
 	}

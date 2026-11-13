@@ -3,7 +3,8 @@
 > 版本：v0.1.0 ｜ 适用平台：Linux / Windows × amd64 / arm64
 > 关联文档：[设计文档](design/victorialogs-s3-backup-design.md)、[AGENTS.md](../AGENTS.md)
 >
-> 本手册描述工具的**已实现行为**，所有 flag、默认值、退出码均与 v0.1.0 二进制实测一致。
+> 本手册描述工具的**已实现行为**，所有 flag、默认值、退出码均与当前二进制实测一致。
+> 本次更新：新增本地文件备份后端（`storage_type=local`）与 `file` / `s3` 子命令路由（R-ST-01~03）；不带后缀的旧命令转 legacy 自动路由。
 
 ---
 
@@ -28,11 +29,11 @@
 
 `vlogs-backup` 是一个 Go 单二进制工具，在 **VictoriaLogs 不停机**的前提下：
 
-- 把按 UTC 天分区的历史日志**备份**到 S3 兼容对象存储（生产为 RustFS）；
+- 把按 UTC 天分区的历史日志**备份**到 S3 兼容对象存储（生产为 RustFS）**或本地目录**；
 - 按**指定日期**把某天日志**在线恢复**回 VL（detach → 替换 → attach，不重启进程）；
-- 提供**校验、本地删除、S3 清理**等运维原子能力。
+- 提供**校验、本地删除、备份清理**等运维原子能力。
 
-工具不解析日志内容，备份/恢复的最小粒度是**一整天分区**。冷热分层（30 天本地保留、冷层落 S3）不是内置流水线，而是由你的调度侧把 `backup → delete` 等原子命令编排起来实现。
+工具不解析日志内容，备份/恢复的最小粒度是**一整天分区**。冷热分层（30 天本地保留、冷层落对象存储或本地备份目录）不是内置流水线，而是由你的调度侧把 `backup → delete` 等原子命令编排起来实现。
 
 ## 2. 核心概念
 
@@ -40,9 +41,9 @@
 | --- | --- |
 | 分区（Partition） | VL 数据目录下的 `partitions/YYYYMMDD`（UTC 日）。所有命令的 `--date` 都指这个日期。 |
 | 快照（Snapshot） | VL 为某分区生成的硬链接视图，秒级完成、几乎不占额外空间。备份只读快照，绝不直接拷分区目录。快照在作业结束/启动时自动清理。 |
-| 备份单元（Backup Unit） | S3 上某节点某天的完整备份：`files/` 下数据文件 + 一个 `manifest.json`。 |
+| 备份单元（Backup Unit） | 某节点某天的完整备份：`files/` 下数据文件 + 一个 `manifest.json`。两种后端目录结构同构：S3 模式落在 `s3://<bucket>/<prefix>/v1/<cluster>/<node>/<YYYYMMDD>/`，本地模式落在 `<local_backup_path>/v1/<cluster>/<node>/<YYYYMMDD>/`（local 忽略 `s3_prefix`）。 |
 | manifest.json | **唯一提交点**，最后写入。没有 manifest 的前缀视为未完成备份，`restore` 拒绝使用、`gc` 负责清理。 |
-| cluster / node | S3 仓库的命名空间标签：`v1/<cluster>/<node>/<YYYYMMDD>/`。cluster 区分哪套环境，node 区分哪台 VL 实例。**定好后不要再改**，否则恢复时身份校验不通过。 |
+| cluster / node | 备份仓库的命名空间标签：`v1/<cluster>/<node>/<YYYYMMDD>/`。cluster 区分哪套环境，node 区分哪台 VL 实例。**定好后不要再改**，否则恢复时身份校验不通过。 |
 | 保留窗口 | 与 VL `-retentionPeriod` 对齐的天数（默认 181 天）。恢复前会校验分区未超出窗口，超出直接拒绝。**VL 的 `-retentionPeriod` 必须 ≥181 天**，否则 attach 回来的分区会被 VL 原生 GC 删除。 |
 
 ## 3. 安装与版本自检
@@ -75,26 +76,35 @@ vlogs-backup version
 ## 4. 五分钟上手
 
 ```bash
-# 第 1 步：交互式生成配置（仅需一次）
-vlogs-backup setup
-#    → 逐项询问 VL 地址、鉴权、数据目录、cluster/node、S3 信息
-#    → 自动做 VL / S3 连通性验证，通过后才落盘
-#    → 生成 /etc/vlogs-backup/config.toml（0644）+ credentials（0600）
+# 第 1 步：交互式生成配置（仅需一次；file / s3 选其一）
+vlogs-backup setup s3        # 只配置 VL + S3 全套，跳过后端选择
+vlogs-backup setup file      # 只配置 VL + 本地备份路径
+vlogs-backup setup           # legacy：向导先问后端（s3 / local），再逐项询问
 
 # 第 2 步：备份 UTC 昨天（默认）
-vlogs-backup backup
+vlogs-backup backup s3                # 备份到 S3；config 生效后端必须是 s3
+vlogs-backup backup file              # 备份到本地；config 生效后端必须是 local
+vlogs-backup backup                   # legacy：按 config 自动路由；stderr 打废弃警告
 
-# 第 3 步：查看 S3 上已提交的备份
-vlogs-backup list
+# 第 3 步：查看已提交的备份
+vlogs-backup list s3                  # 只读扫描 S3
+vlogs-backup list file                # 只读扫描本地目录
+vlogs-backup list                     # legacy 自动路由
 
 # 第 4 步：校验昨天那份备份
-vlogs-backup verify --date 2026-10-27
+vlogs-backup verify s3 --date 2026-10-27
+vlogs-backup verify file --date 2026-10-27
+vlogs-backup verify --date 2026-10-27       # legacy 自动路由
 
 # 第 5 步（需要时）：把 2026-10-27 恢复回 VL
-vlogs-backup restore --date 2026-10-27 --yes
+vlogs-backup restore s3 --date 2026-10-27 --yes
+vlogs-backup restore file --date 2026-10-27 --yes
+vlogs-backup restore --date 2026-10-27 --yes  # legacy 自动路由
 ```
 
 以上每一步都输出摘要（人读表格，`--json` 时单行 JSON），退出码 0 = 成功。
+
+> **Legacy 兼容**：不带 `file` / `s3` 后缀的旧命令仍可用，按 config 里的 `storage_type` 自动路由，stderr 打印废弃警告，`--json` 摘要加 `deprecated: true`。**delete** 与 **version** 不依赖存储后端，始终无后缀。
 
 ## 5. 配置参考
 
@@ -116,10 +126,12 @@ vlogs-backup restore --date 2026-10-27 --yes
 | `data_path` | string | — | VL `--storageDataPath` 的值 |
 | `cluster` | string | `default` | 环境分组名，见 §2；**定好后不改** |
 | `node` | string | `default` | 节点名（单机填主机名即可）；同 cluster 下必须唯一；**定好后不改** |
-| `s3_endpoint` | string | — | S3 端点，如 `http://rustfs:9000` |
+| `storage_type` | string | `s3` | 备份存储后端：`s3`（S3 兼容对象存储）/ `local`（本地文件系统）。`local_backup_path` 非空时自动视为 local，忽略本字段 |
+| `local_backup_path` | string | — | 本地模式备份根目录（绝对路径），目录不存在自动创建。**local 模式忽略 `s3_prefix`**，备份直接落在 `<local_backup_path>/v1/<cluster>/<node>/<date>/` |
+| `s3_endpoint` | string | — | S3 端点，如 `http://rustfs:9000`。`storage_type=s3` 时必填 |
 | `s3_region` | string | 空 | 区域（自建存储通常留空） |
-| `s3_bucket` | string | — | 桶名 |
-| `s3_prefix` | string | `vlogs` | 桶内前缀，备份落在 `<prefix>/v1/<cluster>/<node>/<date>/` |
+| `s3_bucket` | string | — | 桶名。`storage_type=s3` 时必填 |
+| `s3_prefix` | string | `vlogs` | 桶内前缀，备份落在 `<prefix>/v1/<cluster>/<node>/<date>/`；仅 S3 模式生效 |
 | `s3_path_style` | bool | `true` | 自建 S3（RustFS/MinIO 等）保持 `true` |
 | `s3_multipart_threshold` | int | `67108864` | 分段上传阈值（字节，64MiB） |
 | `s3_multipart_part_size` | int | `8388608` | 分片大小（字节，8MiB） |
@@ -151,6 +163,7 @@ vl_token      = "..."   # bearer 模式
 | `VLB_VL_USERNAME` / `VLB_VL_PASSWORD` / `VLB_VL_TOKEN` | credentials 中的同名敏感项 |
 | `VLB_VL_RETENTION_DAYS` | `vl_retention_days` |
 | `VLB_DATA_PATH` / `VLB_CLUSTER` / `VLB_NODE` | `data_path` / `cluster` / `node` |
+| `VLB_STORAGE_TYPE` / `VLB_LOCAL_BACKUP_PATH` | `storage_type` / `local_backup_path` |
 | `VLB_S3_ENDPOINT` / `VLB_S3_REGION` / `VLB_S3_BUCKET` / `VLB_S3_PREFIX` | 同名键 |
 | `VLB_S3_PATH_STYLE` | `s3_path_style` |
 | `VLB_S3_ACCESS_KEY` / `VLB_S3_SECRET_KEY` | credentials 中的 S3 密钥 |
@@ -160,12 +173,22 @@ vl_token      = "..."   # bearer 模式
 
 ### 5.5 各命令必填项
 
-缺必填项一律退出码 2，报错形如 `missing required config vl_url (set via flag, VLB_* env or config file)`。
+缺必填项一律退出码 2，报错形如 `missing required config vl_url (set via flag, VLB_* env or config file)`。存储后端不匹配（如 `backup s3` 但生效后端是 local）同样退出码 2，错误信息给出可操作的修复指引。
+
+**S3 模式（storage_type=s3，默认）**：
 
 | 命令 | 必填项 |
 | --- | --- |
-| `backup` / `restore` / `delete` | `vl_url`、`data_path`、`s3_endpoint`、`s3_bucket` |
-| `list` / `verify` / `gc` | `s3_endpoint`、`s3_bucket` |
+| `backup s3` / `restore s3` / `delete` | `vl_url`、`data_path`、`s3_endpoint`、`s3_bucket` |
+| `list s3` / `verify s3` / `gc s3` | `s3_endpoint`、`s3_bucket` |
+| `setup` | 无（不读已有配置） |
+
+**本地模式（storage_type=local 或 local_backup_path 非空）**：
+
+| 命令 | 必填项 |
+| --- | --- |
+| `backup file` / `restore file` / `delete` | `vl_url`、`data_path`、`local_backup_path` |
+| `list file` / `verify file` / `gc file` | `local_backup_path` |
 | `setup` | 无（不读已有配置） |
 
 鉴权组合校验：`basic` 必须提供用户名+密码；`bearer` 必须提供 token，否则启动即退出码 2。
@@ -175,19 +198,26 @@ vl_token      = "..."   # bearer 模式
 ### 6.1 setup —— 交互式初始化
 
 ```text
-vlogs-backup setup [--output-dir DIR] [--skip-check] [--json]
+vlogs-backup setup file|s3 [--output-dir DIR] [--skip-check] [--json]
 ```
+
+| 入口 | 行为 |
+| --- | --- |
+| `setup s3` | 强制 S3 后端：跳过后端选择，直接问 S3 全套；生成 `storage_type = "s3"` |
+| `setup file` | 强制本地后端：跳过后端选择，只问本地备份路径；生成 `storage_type = "local"` |
+| `setup`（legacy） | 先问后端（`s3` / `local`，默认 `s3`），再按类型条件裁剪后续步骤 |
 
 | flag | 默认 | 说明 |
 | --- | --- | --- |
 | `--output-dir` | `/etc/vlogs-backup` | 配置生成目录 |
-| `--skip-check` | 关 | 跳过 VL / S3 连通性验证 |
+| `--skip-check` | 关 | 跳过 VL / 后端连通性验证 |
 | `--json` | 关 | 结果单行 JSON 输出到 stdout（向导交互文案转 stderr） |
 
 **向导流程**（必须在 TTY 中运行，非交互环境拒绝、退出码 2）：
 
 1. 若目标 `config.toml` 已存在，要求输入 `overwrite` 确认覆盖，其他输入取消（退出码 7）；
-2. 按固定顺序询问：
+2. 后端选择：`setup`（legacy）先询问 `s3` / `local`；`setup file` / `setup s3` 跳过此步；
+3. 按固定顺序询问（**跨后端共用项 + 后端专属项**）：
 
 | 顺序 | 询问项 | 默认值 | 备注 |
 | --- | --- | --- | --- |
@@ -198,16 +228,18 @@ vlogs-backup setup [--output-dir DIR] [--skip-check] [--json]
 | 4 | 数据目录 | 必填 | 必须绝对路径 |
 | 5 | cluster | `default` | 环境分组名（§2） |
 | 6 | node | `default` | 节点名（§2） |
-| 7 | S3 endpoint | `http://127.0.0.1:9000` | |
-| 8 | S3 region | 空 | 可留空 |
-| 9 | S3 bucket | 必填 | |
-| 10 | S3 prefix | `vlogs` | |
-| 11 | path-style | `true` | 输入 true/false |
-| 12 | S3 Access Key / Secret Key | 空 | 可留空；不回显 |
+| — | **以下为后端专属**，按所选后端二选一 | | |
+| 7 | **local：** 本地备份根目录 | 必填 | 绝对路径；目录不存在自动创建；建议与 data_path 不同磁盘。**选完即结束询问** |
+| 7 | **s3：** S3 endpoint | `http://127.0.0.1:9000` | |
+| 8 | **s3：** S3 region | 空 | 可留空 |
+| 9 | **s3：** S3 bucket | 必填 | |
+| 10 | **s3：** S3 prefix | `vlogs` | 仅 S3 模式生效 |
+| 11 | **s3：** path-style | `true` | 输入 true/false |
+| 12 | **s3：** S3 Access Key / Secret Key | 空 | 可留空；不回显 |
 
-3. 连通性验证：VL 走快照 list 能力探测，S3 走 HeadBucket（各 10 秒超时）。失败时选择 `[r]` 重试 / `[v]` 重新输入 / `[a]` 中止（中止退出码 3）。**验证未通过前不落盘任何文件**；
-4. 落盘 `config.toml`（0644）与 `credentials`（0600，全空凭据时不生成）；
-5. 输出生成文件清单。
+4. 连通性验证：VL 走快照 list 能力探测（10 秒超时）；后端按类型分支——S3 走 HeadBucket，local 验证目录可创建且可写。失败时选择 `[r]` 重试 / `[v]` 重新输入 / `[a]` 中止（中止退出码 3）。**验证未通过前不落盘任何文件**；
+5. 落盘 `config.toml`（0644，含 `storage_type` 与对应后端字段）与 `credentials`（0600，全空凭据时不生成）；
+6. 输出生成文件清单与下一步示例（按后端给出 `backup file` / `backup s3`）。
 
 > 交互说明：每项询问前有一行以 `·` 引导的中文说明，解释该配置的用途与取值形式；输错可用退格键修正（`^H` 与 `^?` 均有效，兼容不同 SSH 客户端键码），Ctrl-U 清空整行重输，Ctrl-C 随时中止（退出码 7）。
 
@@ -244,10 +276,10 @@ S3 Secret Key        : ********（不回显）            ← 同上，写入 cr
 | S3 endpoint 带反引号 | `` `http://192.168.1.133:9000` `` | 新版工具同理拒绝 | 改为 `http://192.168.1.133:9000` |
 | S3 Access Key / Secret Key 已正常输入 | credentials 文件两项已写入（setup 摘要以 `***` 掩码显示，掩码即非空） | 无 | 无需补录；若后续 S3 操作报鉴权错误（退出码 1/3），再到 RustFS 控制台核对该 AK/SK |
 
-修正后用 dry-run 验证配置可用：
+修正后用 dry-run 验证配置可用（本会话为 S3 后端）：
 
 ```bash
-vlogs-backup backup --date 2026-10-27 --dry-run
+vlogs-backup backup s3 --date 2026-10-27 --dry-run
 ```
 
 > 注意：凭据不会出现在日志与摘要中；向导里输入的地址不要带 Markdown 反引号等多余字符（详见上表「本次会话需要修正」）。
@@ -255,8 +287,10 @@ vlogs-backup backup --date 2026-10-27 --dry-run
 ### 6.2 backup —— 在线备份
 
 ```text
-vlogs-backup backup [--date 日期 | --from 起 --to 止 | --latest N] [选项]
+vlogs-backup backup file|s3 [--date 日期 | --from 起 --to 止 | --latest N] [选项]
 ```
+
+> `file` / `s3` 强制对应后端（不匹配退出码 2）；不带后缀按 config 自动路由（legacy，stderr 打废弃警告）。以下各节的示例默认 S3 后端，本地后端把 `s3` 换成 `file` 即可。
 
 | flag | 默认 | 说明 |
 | --- | --- | --- |
@@ -283,18 +317,19 @@ vlogs-backup backup [--date 日期 | --from 起 --to 止 | --latest N] [选项]
 示例：
 
 ```bash
-vlogs-backup backup                          # 备份 UTC 昨天
-vlogs-backup backup --date 2026-10-20        # 指定日期
-vlogs-backup backup --from 2026-10-01 --to 2026-10-07   # 区间批量
-vlogs-backup backup --latest 30              # 最近 30 天（含今天）
-vlogs-backup backup --date 2026-10-20 --if-exists=replace   # 重备并替换旧备份
-vlogs-backup backup --date 2026-10-20 --dry-run             # 演练
+vlogs-backup backup s3                       # 备份 UTC 到 S3
+vlogs-backup backup s3 --date 2026-10-20     # 指定日期
+vlogs-backup backup s3 --from 2026-10-01 --to 2026-10-07   # 区间批量
+vlogs-backup backup s3 --latest 30           # 最近 30 天（含今天）
+vlogs-backup backup s3 --date 2026-10-20 --if-exists=replace   # 重备并替换旧备份
+vlogs-backup backup s3 --date 2026-10-20 --dry-run             # 演练
+vlogs-backup backup file --date 2026-10-20   # 本地后端备份
 ```
 
 ### 6.3 restore —— 在线恢复
 
 ```text
-vlogs-backup restore --date 日期 [选项]
+vlogs-backup restore file|s3 --date 日期 [选项]
 ```
 
 | flag | 默认 | 说明 |
@@ -329,15 +364,16 @@ vlogs-backup restore --date 日期 [选项]
 7. 冒烟查询该天是否有数据，摘要字段 `smoke_query`：`ok` / `empty`（attach 成功但查询为空）/ `failed`（不影响退出码，仅告警日志）。
 
 ```bash
-vlogs-backup restore --date 2026-10-27 --yes
-vlogs-backup restore --date 2026-10-27 --deep --on-existing=delete --yes
-vlogs-backup restore --date 2026-10-27 --dry-run
+vlogs-backup restore s3 --date 2026-10-27 --yes
+vlogs-backup restore s3 --date 2026-10-27 --deep --on-existing=delete --yes
+vlogs-backup restore s3 --date 2026-10-27 --dry-run
+vlogs-backup restore file --date 2026-10-27 --yes    # 从本地备份恢复
 ```
 
 ### 6.4 list —— 列举已提交备份
 
 ```text
-vlogs-backup list [--from 起 --to 止] [--json]
+vlogs-backup list file|s3 [--from 起 --to 止] [--json]
 ```
 
 | flag | 默认 | 说明 |
@@ -348,14 +384,15 @@ vlogs-backup list [--from 起 --to 止] [--json]
 只展示**有 manifest 的完整备份单元**。文本输出每行：日期、文件数、字节数，末尾有汇总行。
 
 ```bash
-vlogs-backup list
-vlogs-backup list --from 2026-10-01 --to 2026-10-27
+vlogs-backup list s3
+vlogs-backup list s3 --from 2026-10-01 --to 2026-10-27
+vlogs-backup list file
 ```
 
 ### 6.5 verify —— 校验备份完整性
 
 ```text
-vlogs-backup verify [--date 日期] [--deep] [--json]
+vlogs-backup verify file|s3 [--date 日期] [--deep] [--json]
 ```
 
 | flag | 默认 | 说明 |
@@ -367,8 +404,9 @@ vlogs-backup verify [--date 日期] [--deep] [--json]
 轻校验快速（只读 manifest 与 HEAD）；`--deep` 消耗流量但能发现内容损坏。任何分区校验失败 → 退出码 5，stderr 打印缺失/不一致的对象明细。
 
 ```bash
-vlogs-backup verify                     # 全量轻校验（可进 cron）
-vlogs-backup verify --date 2026-10-27 --deep
+vlogs-backup verify s3                     # 全量轻校验（可进 cron）
+vlogs-backup verify s3 --date 2026-10-27 --deep
+vlogs-backup verify file --date 2026-10-27 --deep
 ```
 
 ### 6.6 delete —— 删除本地分区（高危）
@@ -405,10 +443,10 @@ vlogs-backup delete --date 2026-10-01 --yes            # cron/脚本
 vlogs-backup delete --from 2026-09-01 --to 2026-09-30 --yes   # 30 天窗口清理
 ```
 
-### 6.7 gc —— 清理 S3 未完成前缀
+### 6.7 gc —— 清理未完成前缀
 
 ```text
-vlogs-backup gc [--stale-after 24h] [--yes] [--json]
+vlogs-backup gc file|s3 [--stale-after 24h] [--yes] [--json]
 ```
 
 | flag | 默认 | 说明 |
@@ -417,12 +455,13 @@ vlogs-backup gc [--stale-after 24h] [--yes] [--json]
 | `--yes` | 关 | **执行删除；缺省即 dry-run，只打印计划** |
 | `--json` | 关 | 单行 JSON |
 
-只清理「无 manifest 的未完成前缀」（中断作业的残留）。含 manifest 的完整单元**不在默认范围**——超过 181 天的淘汰交给 S3 桶生命周期规则（RustFS 配置 181d 过期）。人工确需移除完整单元时，保持「先删 manifest 后删数据」顺序。
+只清理「无 manifest 的未完成前缀」（中断作业的残留）。含 manifest 的完整单元**不在默认范围**——超过 181 天的淘汰交给 S3 桶生命周期规则（RustFS 配置 181d 过期）。人工确需移除完整单元时，保持「先删 manifest 后删数据」顺序。`gc file` 清理本地备份根目录下的同类残留（含 Put 中断遗留的 `.tmp-*` 临时文件）。
 
 ```bash
-vlogs-backup gc                        # 默认演练，打印待删清单
-vlogs-backup gc --yes                  # 真正删除
-vlogs-backup gc --stale-after 1h --yes
+vlogs-backup gc s3                     # 默认演练，打印待删清单
+vlogs-backup gc s3 --yes               # 真正删除
+vlogs-backup gc s3 --stale-after 1h --yes
+vlogs-backup gc file --yes             # 本地残留清理
 ```
 
 ### 6.8 version —— 版本自检
@@ -439,7 +478,9 @@ vlogs-backup version [--json]
 
 ### 6.9 通用约定
 
-- `--config` 可作所有命令（除 `version`）的全局选项：`vlogs-backup --config /path/config.toml backup`，或作为子命令 flag：`backup --config /path/config.toml`；
+- `--config` 可作所有命令（除 `version`）的全局选项：`vlogs-backup --config /path/config.toml backup s3`，或作为子命令 flag：`backup s3 --config /path/config.toml`；
+- `file` / `s3` 后缀必须紧跟在命令名之后、其他 flag 之前（如 `backup s3 --date ...`，不能写成 `backup --date ... s3`）；
+- 不带后缀的旧命令（legacy）按 config 生效后端自动路由，stderr 打废弃警告、`--json` 摘要带 `deprecated: true`；`delete` / `version` 无后缀；
 - `--date` 一律按 **UTC** 解释，接受 `2026-10-27` 与 `20261027` 两种写法；
 - 日志（slog 文本、含时间戳/op/cluster/node）全部走 **stderr**，stdout 只有摘要，方便管道与重定向；
 - 路径与错误信息带绝对路径，便于直接定位。
@@ -489,6 +530,7 @@ op 专属字段（仅对应命令出现）：
 | `path` / `has_backup` | delete | 分区绝对路径 / 是否有已提交备份 |
 | `dry_run` | backup / restore / delete / gc | 演练模式 |
 | `units` / `objects` / `leftovers` | gc | 单元数 / 删除对象数 / 残留对象数 |
+| `deprecated` | legacy 自动路由的命令 | true 表示该命令形式已废弃（`backup file` / `backup s3` 不出现） |
 
 告警示例（cron 判断退出码，附 JSON 摘要进告警正文）：
 
@@ -504,7 +546,7 @@ rc=$?
 
 ```cron
 # 每天 02:30 备份 UTC 昨天（VL 与 cron 均按 UTC 口径）
-30 2 * * * vlogs-backup backup --json >> /var/log/vlogs-backup.log 2>&1
+30 2 * * * vlogs-backup backup s3 --json >> /var/log/vlogs-backup.log 2>&1
 ```
 
 退出码非 0 时按 §7 表分类告警；`skipped` 大说明重复备份在空转（检查上游是否重复调度）。
@@ -515,26 +557,26 @@ rc=$?
 
 ```bash
 # 每日序列（调度侧）：
-vlogs-backup backup                    # 1. 备份 UTC 昨天；退出 0 才继续
-vlogs-backup verify --date $(UTC昨天)  # 2. 轻校验
+vlogs-backup backup s3                     # 1. 备份 UTC 昨天；退出 0 才继续
+vlogs-backup verify s3 --date $(UTC昨天)   # 2. 轻校验
 # 3. 每月一次：对 30 天前的分区做 --deep 抽查
 vlogs-backup delete --from <30天前> --to <30天前> --yes   # 4. 释放本地磁盘
 # 5. >181 天的 S3 对象由桶生命周期规则淘汰（不需要本工具）
 ```
 
-顺序保证：`backup` 退出码 0（manifest 已提交）之后才允许 `delete`；若误删了有备份的分区，`delete` 的护栏会拦（退出码 6）。
+顺序保证：`backup s3` 退出码 0（manifest 已提交）之后才允许 `delete`；若误删了有备份的分区，`delete` 的护栏会拦（退出码 6）。
 
 ### 9.3 单天误删恢复
 
 ```bash
 # 确认 S3 上有该天备份
-vlogs-backup list --from 2026-10-27 --to 2026-10-27
+vlogs-backup list s3 --from 2026-10-27 --to 2026-10-27
 
 # 恢复（目标分区存在时旧目录自动保留，可回退）
-vlogs-backup restore --date 2026-10-27 --deep --yes
+vlogs-backup restore s3 --date 2026-10-27 --deep --yes
 
 # 查询验证数据回来了，确认无误后清理保留的旧目录
-vlogs-backup verify --date 2026-10-27
+vlogs-backup verify s3 --date 2026-10-27
 ```
 
 ### 9.4 磁盘紧张快速释放
@@ -548,16 +590,38 @@ vlogs-backup delete --from 2026-09-01 --to 2026-09-30 --yes
 
 ```bash
 # 每周日全量轻校验；每月随机一天 deep 校验
-0 4 * * 0 vlogs-backup verify --json
-0 5 1 * * vlogs-backup verify --date $(上月随机一天) --deep
+0 4 * * 0 vlogs-backup verify s3 --json
+0 5 1 * * vlogs-backup verify s3 --date $(上月随机一天) --deep
 ```
 
 ### 9.6 gc 日常巡检（cron 默认演练）
 
 ```bash
 # 演练输出直接进日志，出现 leftovers 增长再人工 --yes
-0 6 * * * vlogs-backup gc --json
+0 6 * * * vlogs-backup gc s3 --json
 ```
+
+### 9.7 本地备份（单机开发 / 无对象存储环境）
+
+```toml
+# config.toml（关键项）
+vl_url            = "http://127.0.0.1:9428"
+vl_auth_mode      = "none"
+data_path         = "/vmlog-data"
+cluster           = "local-dev"
+node              = "localhost"
+storage_type      = "local"
+local_backup_path = "/mnt/vlogs-backups"
+```
+
+```bash
+vlogs-backup backup file                        # 备份到 /mnt/vlogs-backups/v1/local-dev/localhost/<date>/
+vlogs-backup list file                          # 同样能 list 出来
+vlogs-backup restore file --date 2026-10-27 --yes
+vlogs-backup gc file --yes                      # 清理本地残留
+```
+
+本地备份单元是普通文件系统目录，可直接 `tar` / `rsync` / 压缩为离线副本，不影响其自身被 `restore` 消费的能力。local 模式忽略 `s3_prefix`，无需配置任何 S3 项。
 
 ## 10. 故障处理与回滚
 
@@ -585,6 +649,7 @@ vlogs-backup delete --from 2026-09-01 --to 2026-09-30 --yes
 | 报错（关键字） | 退出码 | 处置 |
 | --- | --- | --- |
 | `missing required config` | 2 | 按 §5.5 补配置 |
+| `effective storage backend is ..., command requires ...` | 2 | 命令后缀与生效后端不符（如 `backup s3` 但 config 是 local）：按错误信息里的指引调整 `storage_type` / `local_backup_path`，或改用对应后缀 / `setup file` / `setup s3` 重新生成 |
 | `refuses to run without --yes` | 2 | 非 TTY 环境显式加 `--yes` |
 | `pass --force-today to proceed` | 2/6 | 确实要操作今天分区再加授权 |
 | `pass --force-no-backup to proceed` | 6 | 该分区无备份，删除不可恢复；确认知情后加 flag |
@@ -612,3 +677,6 @@ vlogs-backup delete --from 2026-09-01 --to 2026-09-30 --yes
 6. 快照是硬链接视图，不额外占数据空间，但 `--keep-snapshot` 保留的快照需人工清理（摘要会提示）。
 7. cluster/node 定好后不要再改；跨环境恢复需显式 `--allow-node-mismatch` 并理解风险。
 8. 工具自身重试只发生在网络访问层（指数退避有限次）；作业层失败即终止并回滚，不做整体重跑——重跑由调度侧决定。
+9. **local 模式忽略 `s3_prefix`**：备份直接落在 `<local_backup_path>/v1/<cluster>/<node>/`，config 里配了 `s3_prefix` 也不会生效（布局裁决，spec R-ST-01）。
+10. `file` / `s3` 后缀必须紧跟命令名（`backup s3 --date ...`）；写在 flag 之后（`backup --date ... s3`）会被当作非法参数退出码 2。
+11. 不带后缀的 legacy 命令会打废弃警告；后续版本将移除，调度脚本请尽快迁移到 `backup file` / `backup s3` 形式。

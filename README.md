@@ -28,11 +28,11 @@
 
 `vlogs-backup` 是一个 Go 单二进制工具，在 **VictoriaLogs 不停机**的前提下：
 
-- 把按 UTC 天分区的历史日志**备份**到 S3 兼容对象存储（生产为 RustFS）；
+- 把按 UTC 天分区的历史日志**备份**到 S3 兼容对象存储（生产为 RustFS）**或本地目录**；
 - 按**指定日期**把某天日志**在线恢复**回 VL（detach → 替换 → attach，不重启进程）；
-- 提供**校验、本地删除、S3 清理**等运维原子能力。
+- 提供**校验、本地删除、备份清理**等运维原子能力。
 
-工具不解析日志内容，备份/恢复的最小粒度是**一整天分区**。冷热分层（30 天本地保留、冷层落 S3）不是内置流水线，而是由你的调度侧把 `backup → delete` 等原子命令编排起来实现。
+工具不解析日志内容，备份/恢复的最小粒度是**一整天分区**。冷热分层（30 天本地保留、冷层落对象存储）不是内置流水线，而是由你的调度侧把 `backup → delete` 等原子命令编排起来实现。
 
 ## 2. 核心概念
 
@@ -40,7 +40,7 @@
 | --- | --- |
 | 分区（Partition） | VL 数据目录下的 `partitions/YYYYMMDD`（UTC 日）。所有命令的 `--date` 都指这个日期。 |
 | 快照（Snapshot） | VL 为某分区生成的硬链接视图，秒级完成、几乎不占额外空间。备份只读快照，绝不直接拷分区目录。快照在作业结束/启动时自动清理。 |
-| 备份单元（Backup Unit） | S3 上某节点某天的完整备份：`files/` 下数据文件 + 一个 `manifest.json`。 |
+| 备份单元（Backup Unit） | 某节点某天的完整备份：`files/` 下数据文件 + 一个 `manifest.json`。两种后端下目录结构完全同构：S3 模式落在 `s3://<bucket>/<prefix>/v1/<cluster>/<node>/<YYYYMMDD>/`，本地模式落在 `<local_backup_path>/v1/<cluster>/<node>/<YYYYMMDD>/`。 |
 | manifest.json | **唯一提交点**，最后写入。没有 manifest 的前缀视为未完成备份，`restore` 拒绝使用、`gc` 负责清理。 |
 | cluster / node | S3 仓库的命名空间标签：`v1/<cluster>/<node>/<YYYYMMDD>/`。cluster 区分哪套环境，node 区分哪台 VL 实例。**定好后不要再改**，否则恢复时身份校验不通过。 |
 | 保留窗口 | 与 VL `-retentionPeriod` 对齐的天数（默认 181 天）。恢复前会校验分区未超出窗口，超出直接拒绝。**VL 的 `-retentionPeriod` 必须 ≥181 天**，否则 attach 回来的分区会被 VL 原生 GC 删除。 |
@@ -72,29 +72,87 @@ vlogs-backup version
 
 `version` 输出构建版本、commit、构建时间与 Go 版本；加 `--json` 输出单行 JSON。
 
+### 3.1 从源码构建
+
+**前置要求**：
+
+- Go ≥ 1.26（见 `go.mod`），无 CGO 依赖；
+- 可选：`golangci-lint`（仅 lint 门禁用，跳过不影响构建）；
+- 可选：`make`（Linux / macOS / WSL / Git Bash 自带；Windows 原生 PowerShell 用 §3.1.2 的裸命令）。
+
+#### 3.1.1 用 Makefile（推荐，bash 环境）
+
+仓库根目录 [Makefile](file:///e:/code-trae/VictoriaLogs-bakup-s3/Makefile) 固化了门禁与构建（对应 AGENTS.md §6）：
+
+```bash
+make gate          # 依次执行全部门禁，任一失败即中止：
+                   #   fmt-check（gofmt -l . 必须无输出）
+                   #   vet（go vet ./...）
+                   #   lint（golangci-lint run）
+                   #   test（go test -race ./...）
+                   #   build-linux（linux/amd64 试编译）
+make build-all     # 产出四平台二进制到 bin/（Windows 产物自动带 .exe）
+make fmt-check     # 单项执行
+make clean         # 清理 bin/
+```
+
+#### 3.1.2 裸命令（Windows PowerShell 原生可用）
+
+```powershell
+# 门禁（逐条）
+gofmt -l .                    # 必须无输出
+go vet ./...
+go test -race ./...
+
+# 四平台交叉编译（Q6：Linux/Windows × amd64/arm64）
+# 注意：PowerShell 不支持 bash 的 "CGO_ENABLED=0 GOOS=..." 前缀写法，必须先设 $env:
+foreach ($t in @("linux/amd64","linux/arm64","windows/amd64","windows/arm64")) {
+    $os = $t.Split("/")[0]; $arch = $t.Split("/")[1]
+    $name = "vlogs-backup-$os-$arch"; if ($os -eq "windows") { $name += ".exe" }
+    $env:CGO_ENABLED = "0"; $env:GOOS = $os; $env:GOARCH = $arch
+    go build -o "bin/$name" ./cmd/vlogs-backup
+}
+Remove-Item Env:CGO_ENABLED, Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
+```
+
+**构建要点**：
+
+- 必须 `CGO_ENABLED=0` 纯 Go 静态编译，产物可直接拷贝到目标机运行（无运行时依赖）；
+- 目标平台固定为四组（Q6 裁决）：`linux/amd64`、`linux/arm64`、`windows/amd64`、`windows/arm64`；
+- 构建完成后跑 `vlogs-backup version` 自检，输出应包含当前 commit 与构建时间。
+
 ## 4. 五分钟上手
 
 ```bash
-# 第 1 步：交互式生成配置（仅需一次）
-vlogs-backup setup
-#    → 逐项询问 VL 地址、鉴权、数据目录、cluster/node、S3 信息
-#    → 自动做 VL / S3 连通性验证，通过后才落盘
-#    → 生成 /etc/vlogs-backup/config.toml（0644）+ credentials（0600）
+# 第 1 步：交互式生成配置（仅需一次；file / s3 选其一）
+vlogs-backup setup s3        # 只配置 VL + S3 全套，跳过后端选择
+vlogs-backup setup file      # 只配置 VL + 本地备份路径
+vlogs-backup setup           # legacy：向导先问后端（s3 / local），再逐项询问
 
 # 第 2 步：备份 UTC 昨天（默认）
-vlogs-backup backup
+vlogs-backup backup s3                # 备份到 S3；强制 config 里 storage_type=s3
+vlogs-backup backup file              # 备份到本地；强制 config 里 storage_type=local
+vlogs-backup backup                   # legacy：按 config 自动路由；stderr 打 deprecated 警告
 
-# 第 3 步：查看 S3 上已提交的备份
-vlogs-backup list
+# 第 3 步：查看已提交的备份
+vlogs-backup list s3                  # 只读扫描 S3
+vlogs-backup list file                # 只读扫描本地目录
+vlogs-backup list                     # legacy 自动路由
 
 # 第 4 步：校验昨天那份备份
-vlogs-backup verify --date 2026-10-27
+vlogs-backup verify s3 --date 2026-10-27
+vlogs-backup verify file --date 2026-10-27
+vlogs-backup verify --date 2026-10-27       # legacy 自动路由
 
 # 第 5 步（需要时）：把 2026-10-27 恢复回 VL
-vlogs-backup restore --date 2026-10-27 --yes
+vlogs-backup restore s3 --date 2026-10-27 --yes
+vlogs-backup restore file --date 2026-10-27 --yes
+vlogs-backup restore --date 2026-10-27 --yes  # legacy 自动路由
 ```
 
 以上每一步都输出摘要（人读表格，`--json` 时单行 JSON），退出码 0 = 成功。
+
+> **Legacy 兼容说明**：不带 `file` / `s3` 子命令的旧命令仍可用，但会按 config 里的 `storage_type` 自动路由，并在 stderr 打印废弃警告，`--json` 摘要里加 `deprecated: true`。**delete** 和 **version** 不依赖存储后端，始终无后缀。
 
 ## 5. 配置参考
 
@@ -116,9 +174,11 @@ vlogs-backup restore --date 2026-10-27 --yes
 | `data_path` | string | — | VL `--storageDataPath` 的值 |
 | `cluster` | string | `default` | 环境分组名，见 §2；**定好后不改** |
 | `node` | string | `default` | 节点名（单机填主机名即可）；同 cluster 下必须唯一；**定好后不改** |
-| `s3_endpoint` | string | — | S3 端点，如 `http://rustfs:9000` |
+| `storage_type` | string | `s3` | 备份存储后端：`s3`（S3 兼容对象存储）/ `local`（本地文件系统）。`local_backup_path` 非空时自动视为 local，忽略本字段 |
+| `local_backup_path` | string | — | 本地模式下的备份根目录（绝对路径）。目录不存在会自动创建。`storage_type=local` 时必填 |
+| `s3_endpoint` | string | — | S3 端点，如 `http://rustfs:9000`。`storage_type=s3` 时必填 |
 | `s3_region` | string | 空 | 区域（自建存储通常留空） |
-| `s3_bucket` | string | — | 桶名 |
+| `s3_bucket` | string | — | 桶名。`storage_type=s3` 时必填 |
 | `s3_prefix` | string | `vlogs` | 桶内前缀，备份落在 `<prefix>/v1/<cluster>/<node>/<date>/` |
 | `s3_path_style` | bool | `true` | 自建 S3（RustFS/MinIO 等）保持 `true` |
 | `s3_multipart_threshold` | int | `67108864` | 分段上传阈值（字节，64MiB） |
@@ -151,6 +211,7 @@ vl_token      = "..."   # bearer 模式
 | `VLB_VL_USERNAME` / `VLB_VL_PASSWORD` / `VLB_VL_TOKEN` | credentials 中的同名敏感项 |
 | `VLB_VL_RETENTION_DAYS` | `vl_retention_days` |
 | `VLB_DATA_PATH` / `VLB_CLUSTER` / `VLB_NODE` | `data_path` / `cluster` / `node` |
+| `VLB_STORAGE_TYPE` / `VLB_LOCAL_BACKUP_PATH` | `storage_type` / `local_backup_path` |
 | `VLB_S3_ENDPOINT` / `VLB_S3_REGION` / `VLB_S3_BUCKET` / `VLB_S3_PREFIX` | 同名键 |
 | `VLB_S3_PATH_STYLE` | `s3_path_style` |
 | `VLB_S3_ACCESS_KEY` / `VLB_S3_SECRET_KEY` | credentials 中的 S3 密钥 |
@@ -162,10 +223,20 @@ vl_token      = "..."   # bearer 模式
 
 缺必填项一律退出码 2，报错形如 `missing required config vl_url (set via flag, VLB_* env or config file)`。
 
+**S3 模式（storage_type=s3，默认）**：
+
 | 命令 | 必填项 |
 | --- | --- |
 | `backup` / `restore` / `delete` | `vl_url`、`data_path`、`s3_endpoint`、`s3_bucket` |
 | `list` / `verify` / `gc` | `s3_endpoint`、`s3_bucket` |
+| `setup` | 无（不读已有配置） |
+
+**本地模式（storage_type=local 或 local_backup_path 非空）**：
+
+| 命令 | 必填项 |
+| --- | --- |
+| `backup` / `restore` / `delete` | `vl_url`、`data_path`、`local_backup_path` |
+| `list` / `verify` / `gc` | `local_backup_path` |
 | `setup` | 无（不读已有配置） |
 
 鉴权组合校验：`basic` 必须提供用户名+密码；`bearer` 必须提供 token，否则启动即退出码 2。
@@ -558,6 +629,29 @@ vlogs-backup delete --from 2026-09-01 --to 2026-09-30 --yes
 # 演练输出直接进日志，出现 leftovers 增长再人工 --yes
 0 6 * * * vlogs-backup gc --json
 ```
+
+### 9.7 本地备份（单机开发 / 无对象存储环境）
+
+```toml
+# config.toml（关键项）
+vl_url          = "http://127.0.0.1:9428"
+vl_auth_mode    = "none"
+data_path       = "/vmlog-data"
+cluster         = "local-dev"
+node            = "localhost"
+storage_type    = "local"
+local_backup_path = "/mnt/vlogs-backups"
+```
+
+```bash
+vlogs-backup backup                        # 备份到 /mnt/vlogs-backups/v1/local-dev/localhost/<date>/
+vlogs-backup list                          # 同样能 list 出来
+vlogs-backup restore --date 2026-10-27 --yes
+```
+
+本地备份单元的目录结构是普通的文件系统目录，可以直接 `tar` / `rsync` / 压缩，作为离线副本，不影响它自身被 `restore` 消费的能力。
+
+> 当前版本 `setup` 向导只支持 S3 交互询问，本地模式需要手写 `config.toml`（或用 `VLB_*` 环境变量）。后续版本会按 `storage_type` 条件跳过 S3 问题。
 
 ## 10. 故障处理与回滚
 

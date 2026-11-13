@@ -93,7 +93,7 @@ func newTestWizard(t *testing.T, lines []string) (*Wizard, *fakePrompter, *bytes
 	clearVLBEnv(t)
 	p := &fakePrompter{lines: lines, interactive: true}
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
-	w := NewWizard(Options{OutputDir: t.TempDir(), Stdout: out, Stderr: errOut}, p)
+	w := NewWizard(Options{OutputDir: t.TempDir(), Stdout: out, Stderr: errOut, ForceBackend: config.StorageTypeS3}, p)
 	// 默认桩掉连通性探测，避免测试触碰 127.0.0.1:9428/9000；需要失败路径的用例自行覆盖。
 	w.checkVL = func(context.Context, *Answers) error { return nil }
 	w.checkS3 = func(context.Context, *Answers) error { return nil }
